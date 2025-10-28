@@ -15,26 +15,22 @@ class DoubleConv(nn.Module):
     """
     Conv → LeakyReLU → Conv → LeakyReLU
     """
-    def __init__(self, in_ch, out_ch):
+    def __init__(self, in_ch, out_ch, p_drop=0.2):
         super().__init__()
         self.conv1 = nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1, bias=False)
         self.batchnorm1 = nn.BatchNorm2d(out_ch)
         self.relu1 = nn.LeakyReLU(negative_slope=0.01, inplace=True)
-        self.drop1 = nn.Dropout2d(p=0.2)
         self.conv2 = nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1, bias=False)
         self.batchnorm2 = nn.BatchNorm2d(out_ch)
         self.relu2 = nn.LeakyReLU(negative_slope=0.01, inplace=True)
-        self.drop2 = nn.Dropout2d(p=0.1)
 
     def forward(self, x):
         x = self.conv1(x)
         x = self.batchnorm1(x)
         x = self.relu1(x)
-        x = self.drop1(x)
         x = self.conv2(x)
         x = self.batchnorm2(x)
         x = self.relu2(x)
-        x = self.drop2(x)
         return x
 
 # imporvement 3 Replacing MaxPooling with a learnable stride-2 convolution
@@ -75,6 +71,7 @@ class Improved2DUNet(nn.Module):
     """
     Same U-Net structure as before, just
     DoubleConv blocks instead of ResBlocks
+    8 laybels week 0-7
     """
     def __init__(self, in_channels=1, n_classes=6, base=32, p_drop=0.2):
         super().__init__()
@@ -117,22 +114,28 @@ class Improved2DUNet(nn.Module):
     
 
 class DiceLoss(nn.Module):
-    def __init__(self, smooth=1.0):
+    def __init__(self, smooth=1e-6):
         super().__init__()
         self.smooth = smooth
 
-    def forward(self, predicted, true):
-        # REFERENCE: https://discuss.pytorch.org/t/implementation-of-dice-loss/53552
-        predicted = predicted.contiguous()
-        true = true.contiguous()
+    def forward(self, logits, targets):
+        # Apply softmax to get class probabilities
+        probs = torch.softmax(logits, dim=1)  # shape: (B, C, H, W)
 
-        intersection = (predicted * true).sum(dim=(2,3))
-        union = (predicted.sum(dim=(2,3)) + true.sum(dim=(2,3)))
+        # One-hot encode targets
+        num_classes = logits.shape[1]
+        targets_onehot = F.one_hot(targets, num_classes).permute(0,3,1,2).float()
 
-        # REFERENCE: https://medium.com/data-scientists-diary/implementation-of-dice-loss-vision-pytorch-7eef1e438f68
-        # addition of smooth avoids div 0 error
-        dice_coefficient = (2 * intersection + self.smooth) / (union + self.smooth)
-        avg_dice_coefficient = dice_coefficient.mean() # mean dice coeff across the 4 classes
-        dice_loss = 1 - avg_dice_coefficient
+        # Flatten for Dice calculation
+        probs_flat = probs.reshape(probs.shape[0], probs.shape[1], -1)
+        targets_flat = targets_onehot.reshape(targets_onehot.shape[0],
+                                             targets_onehot.shape[1], -1)
 
-        return dice_loss
+        # Compute Dice per class
+        intersection = (probs_flat * targets_flat).sum(dim=2)
+        denom = probs_flat.sum(dim=2) + targets_flat.sum(dim=2)
+
+        dice = (2 * intersection + self.smooth) / (denom + self.smooth)
+
+        # Average over batch and classes
+        return 1 - dice.mean()
