@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# frist imporvement use activation function LeakyReLU rater than ReLU
 class DoubleConv(nn.Module):
     """
     Conv → ReLU → Conv → ReLU
@@ -11,9 +12,9 @@ class DoubleConv(nn.Module):
     def __init__(self, in_ch, out_ch):
         super().__init__()
         self.conv1 = nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1)
-        self.relu1 = nn.ReLU(inplace=True)
+        self.relu1 = nn.LeakyReLU(inplace=True)
         self.conv2 = nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1)
-        self.relu2 = nn.ReLU(inplace=True)
+        self.relu2 = nn.LeakyReLU(inplace=True)
 
     def forward(self, x):
         x = self.conv1(x)
