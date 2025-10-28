@@ -5,19 +5,22 @@ import torch.nn.functional as F
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # frist imporvement use activation function LeakyReLU rater than ReLU
-# second imporvement add in a batch normalization
+# second imporvement add in a batch
+# Bias after BN is redundant. BatchNorm learns its own affine shift/scale, so conv bias just wastes params and can add noise.
+# use Kaiming (He) init matches LeakyReLU, giving smoother early training. (0.01)
+
 class DoubleConv(nn.Module):
     """
-    Conv → ReLU → Conv → LeakyReLU
+    Conv → LeakyReLU → Conv → LeakyReLU
     """
     def __init__(self, in_ch, out_ch):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1)
+        self.conv1 = nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1, bias=False)
         self.batchnorm1 = nn.BatchNorm2d(out_ch)
-        self.relu1 = nn.LeakyReLU(inplace=True)
-        self.conv2 = nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1)
+        self.relu1 = nn.LeakyReLU(negative_slope=0.01, inplace=True)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1, bias=False)
         self.batchnorm2 = nn.BatchNorm2d(out_ch)
-        self.relu2 = nn.LeakyReLU(inplace=True)
+        self.relu2 = nn.LeakyReLU(negative_slope=0.01, inplace=True)
 
     def forward(self, x):
         x = self.conv1(x)
@@ -28,6 +31,7 @@ class DoubleConv(nn.Module):
         x = self.relu2(x)
         return x
 
+# imporvement 3 Replacing MaxPooling with a learnable stride-2 convolution
 class Encoder(nn.Module):
     """
     DoubleConv + downsample (stride-2 conv step)
