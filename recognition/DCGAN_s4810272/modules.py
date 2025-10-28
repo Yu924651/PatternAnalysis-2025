@@ -1,3 +1,5 @@
+# use https://colab.research.google.com/drive/1VOsZSyRhyuHLmgoqGriQk01ub4bKNmZ1?usp=sharing as base code
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,7 +9,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # frist imporvement use activation function LeakyReLU rater than ReLU
 # second imporvement add in a batch
 # Bias after BN is redundant. BatchNorm learns its own affine shift/scale, so conv bias just wastes params and can add noise.
-# use Kaiming (He) init matches LeakyReLU, giving smoother early training. (0.01)
+# last imporvement added in drop out 
 
 class DoubleConv(nn.Module):
     """
@@ -18,17 +20,21 @@ class DoubleConv(nn.Module):
         self.conv1 = nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1, bias=False)
         self.batchnorm1 = nn.BatchNorm2d(out_ch)
         self.relu1 = nn.LeakyReLU(negative_slope=0.01, inplace=True)
+        self.drop1 = nn.Dropout2d(p=0.2)
         self.conv2 = nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1, bias=False)
         self.batchnorm2 = nn.BatchNorm2d(out_ch)
         self.relu2 = nn.LeakyReLU(negative_slope=0.01, inplace=True)
+        self.drop2 = nn.Dropout2d(p=0.1)
 
     def forward(self, x):
         x = self.conv1(x)
         x = self.batchnorm1(x)
         x = self.relu1(x)
+        x = self.drop1(x)
         x = self.conv2(x)
         x = self.batchnorm2(x)
         x = self.relu2(x)
+        x = self.drop2(x)
         return x
 
 # imporvement 3 Replacing MaxPooling with a learnable stride-2 convolution
@@ -70,7 +76,7 @@ class Improved2DUNet(nn.Module):
     Same U-Net structure as before, just
     DoubleConv blocks instead of ResBlocks
     """
-    def __init__(self, in_channels=1, n_classes=6, base=32):
+    def __init__(self, in_channels=1, n_classes=6, base=32, p_drop=0.2):
         super().__init__()
         C1, C2, C3, C4, C5 = base, base*2, base*4, base*8, base*16
 
@@ -82,6 +88,7 @@ class Improved2DUNet(nn.Module):
 
         # Bottleneck
         self.bott = DoubleConv(C4, C5)
+        self.drop_bott = nn.Dropout2d(p_drop)
 
         # Decoder
         self.dec3 = Decoder(C5, C4, C4)
@@ -99,6 +106,7 @@ class Improved2DUNet(nn.Module):
         x3, s3 = self.enc3(x2)
 
         xb = self.bott(x3)
+        xb = self.drop_bott(xb)
 
         y3 = self.dec3(xb, s3)
         y2 = self.dec2(y3, s2)
@@ -106,3 +114,25 @@ class Improved2DUNet(nn.Module):
         y0 = self.dec0(y1, x0)
 
         return self.head(y0)   # raw logits
+    
+
+class DiceLoss(nn.Module):
+    def __init__(self, smooth=1.0):
+        super().__init__()
+        self.smooth = smooth
+
+    def forward(self, predicted, true):
+        # REFERENCE: https://discuss.pytorch.org/t/implementation-of-dice-loss/53552
+        predicted = predicted.contiguous()
+        true = true.contiguous()
+
+        intersection = (predicted * true).sum(dim=(2,3))
+        union = (predicted.sum(dim=(2,3)) + true.sum(dim=(2,3)))
+
+        # REFERENCE: https://medium.com/data-scientists-diary/implementation-of-dice-loss-vision-pytorch-7eef1e438f68
+        # addition of smooth avoids div 0 error
+        dice_coefficient = (2 * intersection + self.smooth) / (union + self.smooth)
+        avg_dice_coefficient = dice_coefficient.mean() # mean dice coeff across the 4 classes
+        dice_loss = 1 - avg_dice_coefficient
+
+        return dice_loss
