@@ -111,7 +111,7 @@ class Improved2DUNet(nn.Module):
         y0 = self.dec0(y1, x0)
 
         return self.head(y0)   # raw logits
-    
+
 
 class DiceLoss(nn.Module):
     def __init__(self, smooth=1e-6):
@@ -119,23 +119,29 @@ class DiceLoss(nn.Module):
         self.smooth = smooth
 
     def forward(self, logits, targets):
-        # Apply softmax to get class probabilities
-        probs = torch.softmax(logits, dim=1)  # shape: (B, C, H, W)
+        # logits: (B, C, H, W)
+        # targets: (B, H, W) with integer labels 0..C-1
 
-        # One-hot encode targets
+        # Apply softmax over channel dimension
+        probs = torch.softmax(logits, dim=1)  # (B, C, H, W)
+
         num_classes = logits.shape[1]
-        targets_onehot = F.one_hot(targets, num_classes).permute(0,3,1,2).float()
 
-        # Flatten for Dice calculation
-        probs_flat = probs.reshape(probs.shape[0], probs.shape[1], -1)
-        targets_flat = targets_onehot.reshape(targets_onehot.shape[0],
-                                             targets_onehot.shape[1], -1)
+        # Convert targets into one-hot representation
+        targets_onehot = F.one_hot(
+            targets, num_classes
+        ).permute(0, 3, 1, 2).float()  # (B, C, H, W)
 
-        # Compute Dice per class
+        # Flatten the spatial dimensions
+        probs_flat = probs.flatten(2)          # (B, C, HW)
+        targets_flat = targets_onehot.flatten(2)
+
+        # Compute intersection and union
         intersection = (probs_flat * targets_flat).sum(dim=2)
         denom = probs_flat.sum(dim=2) + targets_flat.sum(dim=2)
 
+        # Dice score for each class
         dice = (2 * intersection + self.smooth) / (denom + self.smooth)
 
-        # Average over batch and classes
-        return 1 - dice.mean()
+        # Final multi-class Dice Loss
+        return 1.0 - dice.mean()
