@@ -130,3 +130,4 @@ class DiceLoss(nn.Module):
 
     def forward(self, pred, target):
         return dice_loss(pred, target, eps=self.eps)
+

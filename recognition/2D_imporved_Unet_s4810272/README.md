@@ -48,6 +48,11 @@ Key modifications include:
 **Output Layer**:
     1×1 convolution with 6 channels
 
+## Data Set
+### Dataset and Data Splits
+The HipMRI dataset provides paired 2D MRI prostate slices and their segmentation masks in .nii.gz format, All images were standardized using Z-score normalization and resized to 256×128 pixels.
+The dataset was divided into three parts: a training set (used to learn the model parameters), a validation set (used to monitor generalization during training), and a test set (used to evaluate the final trained model on unseen data).
+
 ## Training and Prediction
 ### Traning Results
 The model was trained for 30 epochs with a batch size of 8, using Dice loss as the objective function.
@@ -88,7 +93,7 @@ change input and out put file:
 data_path = "/content/drive/My Drive/keras_slices_data"
 save_dir='/content/drive/My Drive/checkpoints'
 ```
-In predict.py also remove:
+In ***predict.py*** also comment out:
 ```
 from dataset import _zscore
 from modules import Improved2DUNet  # remove if running in Colab and model is defined elsewhere
