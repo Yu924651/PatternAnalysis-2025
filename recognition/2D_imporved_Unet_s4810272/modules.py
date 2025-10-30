@@ -94,7 +94,7 @@ class Improved2DUNet(nn.Module):
         self.dec0 = Decoder(C2, C1, C1)
 
         # Final output conv (logits)
-        self.head = nn.Conv2d(C1, n_classes, kernel_size=1)
+        self.out_put = nn.Conv2d(C1, n_classes, kernel_size=1)
 
     def forward(self, x):
         x0 = self.stem(x)
@@ -110,7 +110,7 @@ class Improved2DUNet(nn.Module):
         y1 = self.dec1(y2, s1)
         y0 = self.dec0(y1, x0)
 
-        return self.head(y0)   # raw logits
+        return self.out_put(y0)   # raw logits
 
 
 
@@ -130,23 +130,3 @@ class DiceLoss(nn.Module):
 
     def forward(self, pred, target):
         return dice_loss(pred, target, eps=self.eps)
-
-# -----------------------------
-# Metrics: per-class Dice (logits->argmax)
-# -----------------------------
-@torch.no_grad()
-def dice_all_class(logits, targets, num_classes=6, eps=1e-6):
-    """
-    Returns a list of length C with Dice for each class.
-    logits: (B,C,H,W); targets: (B,H,W) int64
-    """
-    preds = torch.argmax(logits, dim=1)  # (B,H,W)
-    dice_scores = []
-    for c in range(num_classes):
-        p = (preds == c).float()
-        t = (targets == c).float()
-        inter = (p * t).sum(dim=(1,2))
-        denom = p.sum(dim=(1,2)) + t.sum(dim=(1,2))
-        dice = (2 * inter + eps) / (denom + eps)
-        dice_scores.append(dice.mean().item())
-    return dice_scores

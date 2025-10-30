@@ -1,114 +1,136 @@
 """
-Train script for Improved2DUNet on HipMRI dataset
+Train script for Improved2DUNet on HipMRI dataset (simple FP32 version)
 """
 import os, time
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
 import numpy as np
 from tqdm import tqdm
 
+from modules import Improved2DUNet, DiceLoss
 from dataset import make_loaders
-from modules import Improved2DUNet, DiceLoss, dice_all_class
 
 # -----------------------------
-# One epoch of training (AMP + grad clip)
+# One epoch of training (FP32)
 # -----------------------------
-def train_epoch(model, train_loader, criterion, optimizer, device, num_classes=6, amp=True, grad_clip=1.0):
+# -----------------------------
+# One epoch of training (FP32) with streaming per-class Dice
+# -----------------------------
+def train_epoch(model, train_loader, criterion, optimizer, device, num_classes=6, eps=1e-6, report_class=3):
     """
-    Runs one training epoch over the entire training loader.
-    Uses AMP (mixed precision) and optional gradient clipping.
-    Returns average loss and mean Dice per class.
+    Runs one training epoch in FP32.
+    Returns:
+      - epoch loss (float)
+      - per-class Dice for the whole epoch as a list of length C
     """
-
-    model.train()  # train mode
+    model.train()
     running_loss = 0.0
-    dice_scores_per_class = [[] for _ in range(num_classes)]
 
-    scaler = torch.cuda.amp.GradScaler(enabled=(amp and device.type == "cuda"))
+    # Streaming accumulators for Dice: TP, P (pred positives), T (true positives)
+    tp = torch.zeros(num_classes, device=device, dtype=torch.float64)
+    p  = torch.zeros(num_classes, device=device, dtype=torch.float64)
+    t  = torch.zeros(num_classes, device=device, dtype=torch.float64)
 
-    pbar = tqdm(train_loader, desc='Training')  # progress bar
+    pbar = tqdm(train_loader, desc='Training')
     for images, masks in pbar:
         images = images.to(device, non_blocking=True)
         masks  = masks.to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
-        if amp and device.type == "cuda":
-            with torch.cuda.amp.autocast():
-                outputs = model(images)
-                loss = criterion(outputs, masks)
-            scaler.scale(loss).backward()
-            if grad_clip is not None:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            outputs = model(images)
-            loss = criterion(outputs, masks)
-            loss.backward()
-            if grad_clip is not None:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            optimizer.step()
+
+        # Forward → loss → backward → step
+        outputs = model(images)
+        loss = criterion(outputs, masks)
+        loss.backward()
+        optimizer.step()
 
         running_loss += loss.item()
 
+        # ---- streaming per-class Dice stats (no grad) ----
         with torch.no_grad():
-            dice_scores = dice_all_class(outputs, masks, num_classes=num_classes)
-            for i, score in enumerate(dice_scores):
-                dice_scores_per_class[i].append(score)
+            preds = outputs.argmax(dim=1)  # (B,H,W)
 
-        pbar.set_postfix({
-            'loss': f'{loss.item():.4f}',
-            'dice_socre': f'{dice_scores[3]:.4f}' if len(dice_scores) > 3 else 'n/a'
-        })
+            # Update counts per class in a vectorized way
+            for c in range(num_classes):
+                pc = (preds == c)
+                tc = (masks == c)
+                tp[c] += (pc & tc).sum()
+                p[c]  += pc.sum()
+                t[c]  += tc.sum()
 
+            # Quick live preview for one class (e.g., class 3)
+            if 0 <= report_class < num_classes:
+                dice_c = (2.0 * tp[report_class] + eps) / (p[report_class] + t[report_class] + eps)
+                pbar.set_postfix({
+                    'loss': f'{loss.item():.4f}',
+                    f'dice_c{report_class}': f'{float(dice_c):.4f}'
+                })
+            else:
+                pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+
+    # Epoch-level Dice per class from accumulated counts
+    dice_per_class = ((2.0 * tp + eps) / (p + t + eps)).tolist()
     epoch_loss = running_loss / max(1, len(train_loader))
-    avg_dice_per_class = [float(np.mean(scores)) if len(scores) else 0.0
-                          for scores in dice_scores_per_class]
-    return epoch_loss, avg_dice_per_class
+    return epoch_loss, dice_per_class
+
 
 # -----------------------------
-# Validation (AMP for speed)
+# Validation (FP32, no grad)
 # -----------------------------
 @torch.no_grad()
-def validate(model, val_loader, criterion, device, num_classes=6, amp=True):
+def validate(model, val_loader, criterion, device, num_classes=6, eps=1e-6, report_class=3):
+    """
+    Validation loop with streaming per-class Dice (unbiased over the whole epoch).
+    Returns:
+      - epoch_loss (float)
+      - dice_per_class (list length C)
+    """
     model.eval()
     running_loss = 0.0
-    dice_scores_per_class = [[] for _ in range(num_classes)]
+
+    # Streaming accumulators for Dice: TP, P (pred positives), T (true positives)
+    tp = torch.zeros(num_classes, device=device, dtype=torch.float64)
+    p  = torch.zeros(num_classes, device=device, dtype=torch.float64)
+    t  = torch.zeros(num_classes, device=device, dtype=torch.float64)
 
     pbar = tqdm(val_loader, desc='Validation')
     for images, masks in pbar:
         images = images.to(device, non_blocking=True)
         masks  = masks.to(device, non_blocking=True)
 
-        if amp and device.type == "cuda":
-            with torch.cuda.amp.autocast():
-                outputs = model(images)
-                loss = criterion(outputs, masks)
-        else:
-            outputs = model(images)
-            loss = criterion(outputs, masks)
-
+        # Forward + loss (no backward on val)
+        outputs = model(images)
+        loss = criterion(outputs, masks)
         running_loss += loss.item()
 
-        dice_scores = dice_all_class(outputs, masks, num_classes=num_classes)
-        for i, score in enumerate(dice_scores):
-            dice_scores_per_class[i].append(score)
+        # Update streaming Dice stats
+        preds = outputs.argmax(dim=1)  # (B,H,W)
+        for c in range(num_classes):
+            pc = (preds == c)
+            tc = (masks == c)
+            tp[c] += (pc & tc).sum()
+            p[c]  += pc.sum()
+            t[c]  += tc.sum()
 
-        pbar.set_postfix({
-            'loss': f'{loss.item():.4f}',
-            'dice_score': f'{dice_scores[3]:.4f}' if len(dice_scores) > 3 else 'n/a'
-        })
+        # Live preview for a single class (e.g., class 3)
+        if 0 <= report_class < num_classes:
+            dice_c = (2.0 * tp[report_class] + eps) / (p[report_class] + t[report_class] + eps)
+            pbar.set_postfix({
+                'loss': f'{loss.item():.4f}',
+                f'dice_c{report_class}': f'{float(dice_c):.4f}'
+            })
+        else:
+            pbar.set_postfix({'loss': f'{loss.item():.4f}'})
 
+    # Epoch-level Dice per class
+    dice_per_class = ((2.0 * tp + eps) / (p + t + eps)).tolist()
     epoch_loss = running_loss / max(1, len(val_loader))
-    avg_dice_per_class = [float(np.mean(scores)) if len(scores) else 0.0
-                          for scores in dice_scores_per_class]
-    return epoch_loss, avg_dice_per_class
+    return epoch_loss, dice_per_class
+
 
 # -----------------------------
-# Main training loop (AMP + ETA + tuned loaders)
+# Main training loop (FP32)
 # -----------------------------
 def train_model(
     data_path,
@@ -119,19 +141,14 @@ def train_model(
     save_dir='/content/drive/My Drive/checkpoints',
     resize=(256,128),
     num_workers=4,
-    amp=True,                   # turn AMP on
-    grad_clip=1.0,              # small clip stabilizes AMP
-    prefetch_factor=2,          # faster input pipeline
-    persistent_workers=True     # workers stay alive between epochs
+    prefetch_factor=2,
+    persistent_workers=True
 ):
     os.makedirs(save_dir, exist_ok=True)
-
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    # === Dataloaders ===
-    print("Loading datasets...")
-    # If you control make_loaders, pass through num_workers; otherwise, adjust inside it.
+    # Dataloaders
     train_loader, val_loader, test_loader = make_loaders(
         data_root=data_path,
         batch_size=batch_size,
@@ -141,35 +158,12 @@ def train_model(
         num_classes=num_classes,
     )
 
-    # Try to set loader-level speed knobs if these attributes exist
-    # (depends on how make_loaders builds DataLoaders)
-    for loader in [train_loader, val_loader, test_loader]:
-        if hasattr(loader, "prefetch_factor"):
-            try: loader.prefetch_factor = prefetch_factor
-            except Exception: pass
-        if hasattr(loader, "persistent_workers"):
-            try: loader.persistent_workers = (persistent_workers and num_workers > 0)
-            except Exception: pass
-
-    # === Model ===
-    print("Initializing model...")
+    # Model / loss / optimizer
     model = Improved2DUNet(in_channels=1, n_classes=num_classes, base=32, p_drop=0.2).to(device)
-
-    # Count params
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"Total parameters: {total_params:,}")
-
-    # === Loss & Optimizer ===
     criterion = DiceLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-5)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-5)
 
-    # Plateau scheduler on min class dice (no verbose arg for compatibility)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=8)
-
-    # === Logs ===
-    train_losses, val_losses = [], []
-    train_dice_hist, val_dice_hist = [], []
-    best_val_min_dice = 0.0
+    best_val_min_dice = 0.0  # we keep a single best-by-min-class-Dice metric
 
     print(f"\nStarting training for {num_epochs} epochs...\n")
     epoch_start = time.time()
@@ -178,24 +172,17 @@ def train_model(
         print("-" * 50)
 
         train_loss, train_dice = train_epoch(model, train_loader, criterion, optimizer, device,
-                                             num_classes=num_classes, amp=amp, grad_clip=grad_clip)
+                                             num_classes=num_classes)
         val_loss,   val_dice   = validate(model, val_loader, criterion, device,
-                                          num_classes=num_classes, amp=amp)
+                                          num_classes=num_classes)
 
-        # Record
-        train_losses.append(train_loss); val_losses.append(val_loss)
-        train_dice_hist.append(train_dice); val_dice_hist.append(val_dice)
-
-        # Scheduler on min dice across classes
         min_val_dice = min(val_dice)
-        scheduler.step(min_val_dice)
 
-        # Print summary
         print(f"\nTrain Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | LR: {optimizer.param_groups[0]['lr']:.2e}")
         print("Train Dice: " + " ".join([f"C{i}:{d:.4f}" for i,d in enumerate(train_dice)]))
         print("Val   Dice: " + " ".join([f"C{i}:{d:.4f}" for i,d in enumerate(val_dice)]))
 
-        # Save best by min class dice
+        # Save best by min class Dice
         if min_val_dice > best_val_min_dice:
             best_val_min_dice = min_val_dice
             torch.save({
@@ -207,31 +194,23 @@ def train_model(
             }, os.path.join(save_dir, 'best_model.pth'))
             print(f"Saved best model (min Dice across classes): {best_val_min_dice:.4f}")
 
-        # Periodic checkpoint
-        if epoch % 10 == 0:
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-            }, os.path.join(save_dir, f'checkpoint_epoch_{epoch}.pth'))
-
-        # --- Accurate ETA ---
+        # ETA
         epoch_time = time.time() - epoch_start
         remaining = num_epochs - epoch
         eta_min = (epoch_time * remaining) / 60.0
         print(f"Epoch time: {epoch_time:.1f}s | ETA: ~{eta_min:.1f} minutes\n")
         epoch_start = time.time()
 
-
     print("\nTraining completed!")
     print(f"Best validation min Dice (all classes): {best_val_min_dice:.4f}")
-    return model, train_losses, val_losses, train_dice_hist, val_dice_hist
+    return model
+
 
 # -----------------------------
 # Example entry point
 # -----------------------------
 if __name__ == "__main__":
-    data_path = "C:\Users\Fueri\Desktop\Comp3710_A3_report\data\keras_slices_data"
+    data_path = "/content/drive/My Drive/keras_slices_data"
     num_epochs = 30
     batch_size = 8
     learning_rate = 1e-4
@@ -241,12 +220,10 @@ if __name__ == "__main__":
         num_epochs=num_epochs,
         batch_size=batch_size,
         learning_rate=learning_rate,
-        save_dir='C:\Users\Fueri\Desktop\COMP3710A2',
+        save_dir='/content/drive/My Drive/checkpoints',
         num_classes=6,
         resize=(256,128),
-        num_workers=4,         
-        amp=True,               
-        grad_clip=1.0,
+        num_workers=4,
         prefetch_factor=2,
         persistent_workers=True
     )
