@@ -113,35 +113,31 @@ class Improved2DUNet(nn.Module):
         return self.head(y0)   # raw logits
 
 
-class DiceLoss(nn.Module):
-    def __init__(self, smooth=1e-6):
-        super().__init__()
-        self.smooth = smooth
 
-    def forward(self, logits, targets):
-        # logits: (B, C, H, W)
-        # targets: (B, H, W) with integer labels 0..C-1
-
-        # Apply softmax over channel dimension
-        probs = torch.softmax(logits, dim=1)  # (B, C, H, W)
-
-        num_classes = logits.shape[1]
-
-        # Convert targets into one-hot representation
-        targets_onehot = F.one_hot(
-            targets, num_classes
-        ).permute(0, 3, 1, 2).float()  # (B, C, H, W)
-
-        # Flatten the spatial dimensions
-        probs_flat = probs.flatten(2)          # (B, C, HW)
-        targets_flat = targets_onehot.flatten(2)
-
-        # Compute intersection and union
-        intersection = (probs_flat * targets_flat).sum(dim=2)
-        denom = probs_flat.sum(dim=2) + targets_flat.sum(dim=2)
-
-        # Dice score for each class
-        dice = (2 * intersection + self.smooth) / (denom + self.smooth)
-
-        # Final multi-class Dice Loss
-        return 1.0 - dice.mean()
+def dice_loss(pred, target, eps=1e-6):
+    pred = torch.softmax(pred, dim=1)  # convert logits → probabilities
+    target_onehot = F.one_hot(target, num_classes=pred.shape[1]).permute(0, 3, 1, 2).float()
+    intersection = (pred * target_onehot).sum(dim=(0, 2, 3))
+    union = pred.sum(dim=(0, 2, 3)) + target_onehot.sum(dim=(0, 2, 3))
+    dice = (2 * intersection + eps) / (union + eps)
+    return 1 - dice.mean()
+    
+# -----------------------------
+# Metrics: per-class Dice (logits->argmax)
+# -----------------------------
+@torch.no_grad()
+def dice_coefficient(logits, targets, num_classes=6, eps=1e-6):
+    """
+    Returns a list of length C with Dice for each class.
+    logits: (B,C,H,W); targets: (B,H,W) int64
+    """
+    preds = torch.argmax(logits, dim=1)  # (B,H,W)
+    dice_scores = []
+    for c in range(num_classes):
+        p = (preds == c).float()
+        t = (targets == c).float()
+        inter = (p * t).sum(dim=(1,2))
+        denom = p.sum(dim=(1,2)) + t.sum(dim=(1,2))
+        dice = (2 * inter + eps) / (denom + eps)
+        dice_scores.append(dice.mean().item())
+    return dice_scores

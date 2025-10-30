@@ -1,33 +1,64 @@
-import os
+import os, time
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 
-from dataset import HipMRIDataset, make_loaders
+from dataset import make_loaders
 from modules import Improved2DUNet, DiceLoss, dice_coefficient
 
+# --- SPEED FLAGS (must be set early) ---
+torch.backends.cudnn.benchmark = True
+if torch.cuda.is_available():
+    # Allow fast TensorFloat-32 on Ampere+/Hopper GPUs
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = True
+    except Exception:
+        pass
+    # PyTorch 2.x: improves matmul speed/precision policy
+    if hasattr(torch, "set_float32_matmul_precision"):
+        torch.set_float32_matmul_precision("medium")
+
+# --- import your stuff ---
+# from dataset import make_loaders
+# from modules import Improved2DUNet, DiceLoss
+# If the model/dataset are defined in the same notebook/file, skip the imports.
+
 # -----------------------------
-# One epoch of training
+# One epoch of training (AMP + grad clip)
 # -----------------------------
-def train_epoch(model, train_loader, criterion, optimizer, device, num_classes=6):
+def train_epoch(model, train_loader, criterion, optimizer, device, num_classes=6, amp=True, grad_clip=1.0):
     model.train()
     running_loss = 0.0
     dice_scores_per_class = [[] for _ in range(num_classes)]
+
+    scaler = torch.cuda.amp.GradScaler(enabled=(amp and device.type == "cuda"))
 
     pbar = tqdm(train_loader, desc='Training')
     for images, masks in pbar:
         images = images.to(device, non_blocking=True)
         masks  = masks.to(device, non_blocking=True)
 
-        optimizer.zero_grad()
-        outputs = model(images)
-        loss = criterion(outputs, masks)
-        loss.backward()
-        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        if amp and device.type == "cuda":
+            with torch.cuda.amp.autocast():
+                outputs = model(images)
+                loss = criterion(outputs, masks)
+            scaler.scale(loss).backward()
+            if grad_clip is not None:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            outputs = model(images)
+            loss = criterion(outputs, masks)
+            loss.backward()
+            if grad_clip is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            optimizer.step()
 
         running_loss += loss.item()
 
@@ -47,10 +78,10 @@ def train_epoch(model, train_loader, criterion, optimizer, device, num_classes=6
     return epoch_loss, avg_dice_per_class
 
 # -----------------------------
-# Validation
+# Validation (AMP for speed)
 # -----------------------------
 @torch.no_grad()
-def validate(model, val_loader, criterion, device, num_classes=6):
+def validate(model, val_loader, criterion, device, num_classes=6, amp=True):
     model.eval()
     running_loss = 0.0
     dice_scores_per_class = [[] for _ in range(num_classes)]
@@ -60,8 +91,14 @@ def validate(model, val_loader, criterion, device, num_classes=6):
         images = images.to(device, non_blocking=True)
         masks  = masks.to(device, non_blocking=True)
 
-        outputs = model(images)
-        loss = criterion(outputs, masks)
+        if amp and device.type == "cuda":
+            with torch.cuda.amp.autocast():
+                outputs = model(images)
+                loss = criterion(outputs, masks)
+        else:
+            outputs = model(images)
+            loss = criterion(outputs, masks)
+
         running_loss += loss.item()
 
         dice_scores = dice_coefficient(outputs, masks, num_classes=num_classes)
@@ -79,42 +116,21 @@ def validate(model, val_loader, criterion, device, num_classes=6):
     return epoch_loss, avg_dice_per_class
 
 # -----------------------------
-# Plot metrics (loss + min Dice across all classes)
-# -----------------------------
-def plot_metrics(train_losses, val_losses, train_dice, val_dice, save_path='training_metrics.png'):
-    epochs = range(1, len(train_losses) + 1)
-    fig, axes = plt.subplots(1, 2, figsize=(15, 5))
-
-    axes[0].plot(epochs, train_losses, 'b-', label='Train Loss')
-    axes[0].plot(epochs, val_losses, 'r-', label='Val Loss')
-    axes[0].set_xlabel('Epoch'); axes[0].set_ylabel('Loss')
-    axes[0].set_title('Training and Validation Loss'); axes[0].legend(); axes[0].grid(True)
-
-    train_dice_min = [min(d) for d in train_dice]
-    val_dice_min   = [min(d) for d in val_dice]
-    axes[1].plot(epochs, train_dice_min, 'b-', label='Train Dice (Min)')
-    axes[1].plot(epochs, val_dice_min,   'r-', label='Val Dice (Min)')
-    axes[1].axhline(y=0.75, color='g', linestyle='--', label='Target (0.75)')
-    axes[1].set_xlabel('Epoch'); axes[1].set_ylabel('Dice Score')
-    axes[1].set_title('Minimum Dice Score (All Classes)'); axes[1].legend(); axes[1].grid(True)
-
-    plt.tight_layout()
-    plt.savefig(save_path)
-    plt.close()
-    print(f"Metrics plot saved to {save_path}")
-
-# -----------------------------
-# Main training loop
+# Main training loop (AMP + ETA + tuned loaders)
 # -----------------------------
 def train_model(
     data_path,
-    num_epochs=100,
+    num_epochs=30,
     batch_size=8,
     learning_rate=1e-4,
     num_classes=6,
-    save_dir='checkpoints',
+    save_dir='/content/drive/My Drive/checkpoints',
     resize=(256,128),
-    num_workers=4
+    num_workers=2,              # <= per your system warning
+    amp=True,                   # turn AMP on
+    grad_clip=1.0,              # small clip stabilizes AMP
+    prefetch_factor=2,          # faster input pipeline
+    persistent_workers=True     # workers stay alive between epochs
 ):
     os.makedirs(save_dir, exist_ok=True)
 
@@ -123,14 +139,27 @@ def train_model(
 
     # === Dataloaders ===
     print("Loading datasets...")
+    # If you control make_loaders, pass through num_workers; otherwise, adjust inside it.
     train_loader, val_loader, test_loader = make_loaders(
         data_root=data_path,
         batch_size=batch_size,
         num_workers=num_workers,
         resize=resize,
         normalize=True,
-        num_classes=num_classes
+        num_classes=num_classes,
+        transform_train=None,
+        transform_eval=None,
     )
+
+    # Try to set loader-level speed knobs if these attributes exist
+    # (depends on how make_loaders builds DataLoaders)
+    for loader in [train_loader, val_loader, test_loader]:
+        if hasattr(loader, "prefetch_factor"):
+            try: loader.prefetch_factor = prefetch_factor
+            except Exception: pass
+        if hasattr(loader, "persistent_workers"):
+            try: loader.persistent_workers = (persistent_workers and num_workers > 0)
+            except Exception: pass
 
     # === Model ===
     print("Initializing model...")
@@ -141,11 +170,11 @@ def train_model(
     print(f"Total parameters: {total_params:,}")
 
     # === Loss & Optimizer ===
-    criterion = DiceLoss()  # your Dice loss
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
+    criterion = DiceLoss()
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-5)
 
-    # Simple plateau scheduler tracking min class dice (conservative)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=10)
+    # Plateau scheduler on min class dice (no verbose arg for compatibility)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=8)
 
     # === Logs ===
     train_losses, val_losses = [], []
@@ -153,12 +182,15 @@ def train_model(
     best_val_min_dice = 0.0
 
     print(f"\nStarting training for {num_epochs} epochs...\n")
+    epoch_start = time.time()
     for epoch in range(1, num_epochs + 1):
         print(f"Epoch {epoch}/{num_epochs}")
         print("-" * 50)
 
-        train_loss, train_dice = train_epoch(model, train_loader, criterion, optimizer, device, num_classes)
-        val_loss,   val_dice   = validate(model, val_loader, criterion, device, num_classes)
+        train_loss, train_dice = train_epoch(model, train_loader, criterion, optimizer, device,
+                                             num_classes=num_classes, amp=amp, grad_clip=grad_clip)
+        val_loss,   val_dice   = validate(model, val_loader, criterion, device,
+                                          num_classes=num_classes, amp=amp)
 
         # Record
         train_losses.append(train_loss); val_losses.append(val_loss)
@@ -169,7 +201,7 @@ def train_model(
         scheduler.step(min_val_dice)
 
         # Print summary
-        print(f"\nTrain Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+        print(f"\nTrain Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | LR: {optimizer.param_groups[0]['lr']:.2e}")
         print("Train Dice: " + " ".join([f"C{i}:{d:.4f}" for i,d in enumerate(train_dice)]))
         print("Val   Dice: " + " ".join([f"C{i}:{d:.4f}" for i,d in enumerate(val_dice)]))
 
@@ -193,11 +225,13 @@ def train_model(
                 'optimizer_state_dict': optimizer.state_dict(),
             }, os.path.join(save_dir, f'checkpoint_epoch_{epoch}.pth'))
 
-        print()
+        # --- Accurate ETA ---
+        epoch_time = time.time() - epoch_start
+        remaining = num_epochs - epoch
+        eta_min = (epoch_time * remaining) / 60.0
+        print(f"Epoch time: {epoch_time:.1f}s | ETA: ~{eta_min:.1f} minutes\n")
+        epoch_start = time.time()
 
-    # Plot curves
-    plot_metrics(train_losses, val_losses, train_dice_hist, val_dice_hist,
-                 save_path=os.path.join(save_dir, 'training_metrics.png'))
 
     print("\nTraining completed!")
     print(f"Best validation min Dice (all classes): {best_val_min_dice:.4f}")
@@ -217,8 +251,12 @@ if __name__ == "__main__":
         num_epochs=num_epochs,
         batch_size=batch_size,
         learning_rate=learning_rate,
-        save_dir='checkpoints',
+        save_dir='/content/drive/My Drive/checkpoints',
         num_classes=6,
         resize=(256,128),
-        num_workers=2
+        num_workers=4,          # per your system warning
+        amp=True,               # turn on AMP for speed
+        grad_clip=1.0,
+        prefetch_factor=2,
+        persistent_workers=True
     )
