@@ -1,3 +1,6 @@
+"""
+Train script for Improved2DUNet on HipMRI dataset
+"""
 import os, time
 import torch
 import torch.nn as nn
@@ -9,30 +12,23 @@ from tqdm import tqdm
 from dataset import make_loaders
 from modules import Improved2DUNet, DiceLoss, dice_all_class
 
-# --- SPEED FLAGS (must be set early) ---
-torch.backends.cudnn.benchmark = True
-if torch.cuda.is_available():
-    # Allow fast TensorFloat-32 on Ampere+/Hopper GPUs
-    try:
-        torch.backends.cuda.matmul.allow_tf32 = True
-    except Exception:
-        pass
-    # PyTorch 2.x: improves matmul speed/precision policy
-    if hasattr(torch, "set_float32_matmul_precision"):
-        torch.set_float32_matmul_precision("medium")
-
-
 # -----------------------------
 # One epoch of training (AMP + grad clip)
 # -----------------------------
 def train_epoch(model, train_loader, criterion, optimizer, device, num_classes=6, amp=True, grad_clip=1.0):
-    model.train()
+    """
+    Runs one training epoch over the entire training loader.
+    Uses AMP (mixed precision) and optional gradient clipping.
+    Returns average loss and mean Dice per class.
+    """
+
+    model.train()  # train mode
     running_loss = 0.0
     dice_scores_per_class = [[] for _ in range(num_classes)]
 
     scaler = torch.cuda.amp.GradScaler(enabled=(amp and device.type == "cuda"))
 
-    pbar = tqdm(train_loader, desc='Training')
+    pbar = tqdm(train_loader, desc='Training')  # progress bar
     for images, masks in pbar:
         images = images.to(device, non_blocking=True)
         masks  = masks.to(device, non_blocking=True)
@@ -235,7 +231,7 @@ def train_model(
 # Example entry point
 # -----------------------------
 if __name__ == "__main__":
-    data_path = "/content/drive/My Drive/keras_slices_data"
+    data_path = "C:\Users\Fueri\Desktop\Comp3710_A3_report\data\keras_slices_data"
     num_epochs = 30
     batch_size = 8
     learning_rate = 1e-4
@@ -245,7 +241,7 @@ if __name__ == "__main__":
         num_epochs=num_epochs,
         batch_size=batch_size,
         learning_rate=learning_rate,
-        save_dir='/content/drive/My Drive/checkpoints',
+        save_dir='C:\Users\Fueri\Desktop\COMP3710A2',
         num_classes=6,
         resize=(256,128),
         num_workers=4,         

@@ -1,6 +1,0 @@
-TRAIN_IMG_PATH = 'data/keras_slices_data/keras_slices_train'
-TRAIN_LABEL_PATH ='data/keras_slices_data/keras_slices_seg_train'
-VAL_IMG_PATH ='data/keras_slices_data/keras_slices_validate'
-VAL_LABEL_PATH ='data/keras_slices_data/keras_slices_seg_validate'
-TEST_IMG_PATH ='data/keras_slices_data/keras_slices_test'
-TEST_LABEL_PATH ='data/keras_slices_data/keras_slices_seg_test'
