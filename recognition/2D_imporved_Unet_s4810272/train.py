@@ -7,7 +7,7 @@ import numpy as np
 from tqdm import tqdm
 
 from dataset import make_loaders
-from modules import Improved2DUNet, DiceLoss, dice_coefficient
+from modules import Improved2DUNet, DiceLoss, dice_all_class
 
 # --- SPEED FLAGS (must be set early) ---
 torch.backends.cudnn.benchmark = True
@@ -21,10 +21,6 @@ if torch.cuda.is_available():
     if hasattr(torch, "set_float32_matmul_precision"):
         torch.set_float32_matmul_precision("medium")
 
-# --- import your stuff ---
-# from dataset import make_loaders
-# from modules import Improved2DUNet, DiceLoss
-# If the model/dataset are defined in the same notebook/file, skip the imports.
 
 # -----------------------------
 # One epoch of training (AMP + grad clip)
@@ -63,13 +59,13 @@ def train_epoch(model, train_loader, criterion, optimizer, device, num_classes=6
         running_loss += loss.item()
 
         with torch.no_grad():
-            dice_scores = dice_coefficient(outputs, masks, num_classes=num_classes)
+            dice_scores = dice_all_class(outputs, masks, num_classes=num_classes)
             for i, score in enumerate(dice_scores):
                 dice_scores_per_class[i].append(score)
 
         pbar.set_postfix({
             'loss': f'{loss.item():.4f}',
-            'dice_c3': f'{dice_scores[3]:.4f}' if len(dice_scores) > 3 else 'n/a'
+            'dice_socre': f'{dice_scores[3]:.4f}' if len(dice_scores) > 3 else 'n/a'
         })
 
     epoch_loss = running_loss / max(1, len(train_loader))
@@ -101,13 +97,13 @@ def validate(model, val_loader, criterion, device, num_classes=6, amp=True):
 
         running_loss += loss.item()
 
-        dice_scores = dice_coefficient(outputs, masks, num_classes=num_classes)
+        dice_scores = dice_all_class(outputs, masks, num_classes=num_classes)
         for i, score in enumerate(dice_scores):
             dice_scores_per_class[i].append(score)
 
         pbar.set_postfix({
             'loss': f'{loss.item():.4f}',
-            'dice_c3': f'{dice_scores[3]:.4f}' if len(dice_scores) > 3 else 'n/a'
+            'dice_score': f'{dice_scores[3]:.4f}' if len(dice_scores) > 3 else 'n/a'
         })
 
     epoch_loss = running_loss / max(1, len(val_loader))
@@ -147,8 +143,6 @@ def train_model(
         resize=resize,
         normalize=True,
         num_classes=num_classes,
-        transform_train=None,
-        transform_eval=None,
     )
 
     # Try to set loader-level speed knobs if these attributes exist
@@ -254,8 +248,8 @@ if __name__ == "__main__":
         save_dir='/content/drive/My Drive/checkpoints',
         num_classes=6,
         resize=(256,128),
-        num_workers=4,          # per your system warning
-        amp=True,               # turn on AMP for speed
+        num_workers=4,         
+        amp=True,               
         grad_clip=1.0,
         prefetch_factor=2,
         persistent_workers=True

@@ -122,11 +122,20 @@ def dice_loss(pred, target, eps=1e-6):
     dice = (2 * intersection + eps) / (union + eps)
     return 1 - dice.mean()
     
+class DiceLoss(nn.Module):
+    """Wrapper so you can still do `criterion = DiceLoss()` with no args."""
+    def __init__(self, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, pred, target):
+        return dice_loss(pred, target, eps=self.eps)
+
 # -----------------------------
 # Metrics: per-class Dice (logits->argmax)
 # -----------------------------
 @torch.no_grad()
-def dice_coefficient(logits, targets, num_classes=6, eps=1e-6):
+def dice_all_class(logits, targets, num_classes=6, eps=1e-6):
     """
     Returns a list of length C with Dice for each class.
     logits: (B,C,H,W); targets: (B,H,W) int64
