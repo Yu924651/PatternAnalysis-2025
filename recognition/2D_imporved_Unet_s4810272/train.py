@@ -122,7 +122,7 @@ def train_model(
     num_classes=6,
     save_dir='/content/drive/My Drive/checkpoints',
     resize=(256,128),
-    num_workers=2,              # <= per your system warning
+    num_workers=4,
     amp=True,                   # turn AMP on
     grad_clip=1.0,              # small clip stabilizes AMP
     prefetch_factor=2,          # faster input pipeline

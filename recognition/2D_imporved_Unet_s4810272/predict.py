@@ -1,210 +1,179 @@
-"""
-Fast 2D U-Net Trainer (Mixed Precision + channels_last)
-
-Compatible with:
-- Improved2DUNet, DiceLoss, dice_per_class_from_logits in modules.py
-- HipMRIDataset / make_loaders in dataset.py
-"""
+# === Predict + Visualize for HipMRI (Colab-ready) ===
+# - Load trained Improved2DUNet from checkpoint
+# - Predict one file OR a whole folder of .nii.gz 2D slices
+# - Save masks and visualize input/mask/overlay
 
 import os
+from glob import glob
+from typing import Optional, Tuple, List
+
 import numpy as np
+import nibabel as nib
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from tqdm import tqdm
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
 
-# ---- bring your components ----
-from dataset import make_loaders
-from modules import Improved2DUNet, DiceLoss, dice_per_class_from_logits
+from modules import Improved2DUNet
 
-# ================= CONFIG =================
-DATA_ROOT = "/content/drive/My Drive/keras_slices_data"
-OUTDIR     = "/content/drive/My Drive"
-IN_CHANNELS = 1
+
+
+# --------------------------
+# Config (edit as needed)
+# --------------------------
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 NUM_CLASSES = 6
-PROSTATE_CLASS = 1
-BASE = 32
-RESIZE = (256, 128)
+RESIZE: Optional[Tuple[int, int]] = (256, 128)  # must match training
+CHECKPOINT_PATH = "/content/drive/My Drive/checkpoints/best_model.pth"
 
-EPOCHS = 30
-BATCH_SIZE = 8       
-LR = 1e-4
-WEIGHT_DECAY = 1e-5
-NUM_WORKERS = 8
-GRAD_CLIP = 1.0
-PATIENCE = 5
-# ==========================================
+# Example paths
+TEST_IMAGE  = "/content/drive/My Drive/keras_slices_data/keras_slices_test/case_040_week_0_slice_0.nii.gz"
+SAVE_SINGLE = "/content/drive/My Drive/predictions/save_output"
 
-def format_dice_row(dice_vec, highlight_idx=None, prefix=""):
-    """Return a string like: C0:0.9123 C1:[0.8450] C2:0.1234 ..."""
-    parts = []
-    for i, d in enumerate(dice_vec):
-        if highlight_idx is not None and i == highlight_idx:
-            parts.append(f"C{i}:[{d:.4f}]")
-        else:
-            parts.append(f"C{i}:{d:.4f}")
-    return (prefix + " ".join(parts)).strip()
+TEST_FOLDER = "/content/drive/My Drive/keras_slices_data/keras_slices_test"
+SAVE_FOLDER = "/content/drive/My Drive/save_output"
 
 
-def train_epoch(model, loader, optimizer, loss_fn, device):
-    model.train()
-    has_cuda = (device.type == "cuda")
+# --------------------------
+# Helpers
+# --------------------------
+def zscore(x: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    mu = float(x.mean())
+    sd = float(x.std())
+    return (x - mu) / (sd + eps)
 
-    sum_loss = 0.0
-    steps = 0
-    dice_sum = np.zeros(NUM_CLASSES, dtype=np.float64)
-
-    pbar = tqdm(loader, desc="TRAIN", ncols=120)
-    for x, y in pbar:
-        x = x.to(device, non_blocking=True).to(memory_format=torch.channels_last)
-        y = y.to(device, non_blocking=True)
-
-        optimizer.zero_grad(set_to_none=True)
-
-        # AMP for speed
-        with torch.amp.autocast("cuda", enabled=has_cuda):
-            logits = model(x)
-            loss = 0.5 * loss_fn(logits, y) + 0.5 * nn.functional.cross_entropy(logits, y)
-
-        loss.backward()
-        if GRAD_CLIP and GRAD_CLIP > 0:
-            nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
-        optimizer.step()
-
-        steps += 1
-        sum_loss += float(loss)
-        dice_sum += dice_per_class_from_logits(logits, y, NUM_CLASSES)
-
-        avg_loss = sum_loss / steps
-        avg_dice = dice_sum / steps
-        pbar.set_postfix({
-            "loss": f"{avg_loss:.4f}",
-            "macro": f"{avg_dice.mean():.4f}",
-            "pros": f"{avg_dice[PROSTATE_CLASS]:.4f}",
-        })
-
-    return (sum_loss / steps), (dice_sum / steps)
-
+def load_model(checkpoint_path: str, n_classes: int = NUM_CLASSES) -> torch.nn.Module:
+    model = Improved2DUNet(in_channels=1, n_classes=n_classes, base=32, p_drop=0.2)
+    ckpt = torch.load(checkpoint_path, map_location=DEVICE)
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.to(DEVICE).eval()
+    return model
 
 @torch.no_grad()
-def validate_epoch(model, loader, loss_fn, device):
-    model.eval()
-    has_cuda = (device.type == "cuda")
+def predict_tensor(model: torch.nn.Module, img_t: torch.Tensor) -> np.ndarray:
+    """
+    img_t: (1,1,H,W) float32 normalized, already resized if needed
+    returns np.ndarray mask (H,W) with class ids [0..NUM_CLASSES-1]
+    """
+    use_amp = (DEVICE.type == "cuda")
+    with torch.cuda.amp.autocast(enabled=use_amp):
+        logits = model(img_t)
+        pred = torch.argmax(logits, dim=1)  # (1,H,W)
+    return pred.squeeze(0).detach().cpu().numpy()
 
-    sum_loss = 0.0
-    steps = 0
-    dice_sum = np.zeros(NUM_CLASSES, dtype=np.float64)
+@torch.no_grad()
+def predict_one(model: torch.nn.Module,
+                image_path: str,
+                save_path: Optional[str] = None,
+                resize: Optional[Tuple[int, int]] = RESIZE) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Returns (image_2d_float, pred_mask_int) and optionally saves mask as NIfTI.
+    """
+    # --- Load NIfTI ---
+    nii = nib.load(image_path)
+    img = nii.get_fdata(dtype=np.float32)
+    if img.ndim != 2:
+        raise ValueError(f"Expected 2D NIfTI but got shape {img.shape} at {image_path}")
 
-    pbar = tqdm(loader, desc="VAL", ncols=120, colour="cyan")
-    for x, y in pbar:
-        x = x.to(device, non_blocking=True).to(memory_format=torch.channels_last)
-        y = y.to(device, non_blocking=True)
+    # --- Preprocess ---
+    img_norm = zscore(img)
+    img_t = torch.from_numpy(img_norm).unsqueeze(0).unsqueeze(0).to(DEVICE)  # (1,1,H,W)
 
-        with torch.amp.autocast("cuda", enabled=has_cuda):
-            logits = model(x)
-            loss = 0.5 * loss_fn(logits, y) + 0.5 * nn.functional.cross_entropy(logits, y)
+    # Keep original affine for saving out
+    affine = nii.affine
 
-        steps += 1
-        sum_loss += float(loss)
-        dice_sum += dice_per_class_from_logits(logits, y, NUM_CLASSES)
+    # Optional resize to training size
+    if resize is not None and img_t.shape[2:] != resize:
+        img_t = F.interpolate(img_t, size=resize, mode="bilinear", align_corners=False)
 
-        avg_loss = sum_loss / steps
-        avg_dice = dice_sum / steps
-        pbar.set_postfix({
-            "loss": f"{avg_loss:.4f}",
-            "macro": f"{avg_dice.mean():.4f}",
-            "pros": f"{avg_dice[PROSTATE_CLASS]:.4f}",
-        })
+    # --- Inference ---
+    pred = predict_tensor(model, img_t)  # (H_resized, W_resized)
 
-    return (sum_loss / steps), (dice_sum / steps)
-
-
-def main():
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-
-    # ---- Data ----
-    os.makedirs(OUTDIR, exist_ok=True)
-    train_loader, val_loader, test_loader = make_loaders(
-        data_root=DATA_ROOT,
-        batch_size=BATCH_SIZE,
-        num_workers=NUM_WORKERS,
-        resize=RESIZE,
-        normalize=True,
-        num_classes=NUM_CLASSES,
-        transform_train=None,
-        transform_eval=None,
-    )
-    # optional: persistent workers for a tiny speed bump
-    for ld in (train_loader, val_loader, test_loader):
-        ld.persistent_workers = True
-
-    # ---- Model / Optim ----
-    model = Improved2DUNet(IN_CHANNELS, NUM_CLASSES, BASE)
-    model = model.to(device).to(memory_format=torch.channels_last)
-
-    loss_fn = DiceLoss().to(device)
-    optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
-
-    best_pros = 0.0
-    no_improve = 0
-
-    print("\nStarting training...\n")
-    for epoch in range(1, EPOCHS + 1):
-        print(f"\n================= EPOCH {epoch}/{EPOCHS} =================")
-
-        tr_loss, tr_dice = train_epoch(model, train_loader, optimizer, loss_fn, device)
-        va_loss, va_dice = validate_epoch(model, val_loader, loss_fn, device)
-
-        # ---- Pretty printing (includes per-class) ----
-        print(f"TRAIN: loss={tr_loss:.4f} | macro={tr_dice.mean():.4f}")
-        print("   " + format_dice_row(tr_dice, highlight_idx=PROSTATE_CLASS, prefix="Train Dice → "))
-
-        print(f"VAL:   loss={va_loss:.4f} | macro={va_dice.mean():.4f}")
-        print("   " + format_dice_row(va_dice, highlight_idx=PROSTATE_CLASS, prefix="Val   Dice → "))
-
-        # ---- Checkpointing ----
-        torch.save(model.state_dict(), os.path.join(OUTDIR, "last.pt"))
-
-        if va_dice[PROSTATE_CLASS] > best_pros:
-            best_pros = float(va_dice[PROSTATE_CLASS])
-            no_improve = 0
-            torch.save(model.state_dict(), os.path.join(OUTDIR, "best.pt"))
-            print(f"Best updated! Val prostate Dice = {best_pros:.4f}")
+    # Save using the same affine as input (note: shape may differ if resized)
+    if save_path is not None:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        # If we resized, we may want to up/downsample back to original size.
+        if resize is not None and pred.shape != img.shape:
+            pred_back = torch.from_numpy(pred[None, None].astype(np.float32))
+            pred_back = F.interpolate(pred_back, size=img.shape, mode="nearest")
+            pred_back = pred_back.squeeze().numpy().astype(np.uint8)
         else:
-            no_improve += 1
-            if no_improve >= PATIENCE:
-                print("Early stopping — no validation improvement.")
-                break
+            pred_back = pred.astype(np.uint8)
 
-    print("\nTraining finished.")
+        nib.save(nib.Nifti1Image(pred_back, affine), save_path)
+        print(f"Saved predicted mask → {save_path}")
 
-    # ---- Test using best weights ----
-    if os.path.isfile(os.path.join(OUTDIR, "best.pt")):
-        model.load_state_dict(torch.load(os.path.join(OUTDIR, "best.pt"), map_location=device))
-        print("Loaded best.pt for testing")
-    else:
-        print("best.pt not found; using last.pt")
-        model.load_state_dict(torch.load(os.path.join(OUTDIR, "last.pt"), map_location=device))
+    return img_norm, pred  # return normalized image (for viz) and resized pred
 
-    model.eval()
-    with torch.no_grad():
-        sum_dice = np.zeros(NUM_CLASSES, dtype=np.float64)
-        steps = 0
-        for x, y in tqdm(test_loader, desc="TEST", ncols=120, colour="green"):
-            x = x.to(device).to(memory_format=torch.channels_last)
-            y = y.to(device)
-            logits = model(x)
-            sum_dice += dice_per_class_from_logits(logits, y, NUM_CLASSES)
-            steps += 1
+def visualize_triplet(img2d: np.ndarray, mask2d: np.ndarray, alpha: float = 0.35, title: str = ""):
+    """
+    Show input, mask, and overlay side-by-side.
+    """
+    plt.figure(figsize=(12, 4))
 
-        test_dice = sum_dice / max(1, steps)
-        print("\n===== TEST RESULTS =====")
-        print(" " + format_dice_row(test_dice, highlight_idx=PROSTATE_CLASS, prefix="Per-class → "))
-        print(f" Macro Dice: {test_dice.mean():.4f}")
-        print(f" Prostate (C{PROSTATE_CLASS}) Dice: {test_dice[PROSTATE_CLASS]:.4f}")
+    plt.subplot(1, 3, 1)
+    plt.imshow(img2d, cmap="gray")
+    plt.title("Input MRI")
+    plt.axis("off")
+
+    plt.subplot(1, 3, 2)
+    plt.imshow(mask2d, cmap="nipy_spectral", interpolation="nearest", vmin=0, vmax=NUM_CLASSES-1)
+    plt.title("Predicted Mask")
+    plt.axis("off")
+
+    plt.subplot(1, 3, 3)
+    plt.imshow(img2d, cmap="gray")
+    plt.imshow(mask2d, cmap="nipy_spectral", interpolation="nearest", alpha=alpha, vmin=0, vmax=NUM_CLASSES-1)
+    plt.title("Overlay")
+    plt.axis("off")
+
+    if title:
+        plt.suptitle(title)
+    plt.tight_layout()
+    plt.show()
+
+@torch.no_grad()
+def predict_folder(model: torch.nn.Module,
+                   image_dir: str,
+                   save_dir: Optional[str] = None,
+                   max_visualize: int = 4,
+                   resize: Optional[Tuple[int, int]] = RESIZE) -> List[str]:
+    """
+    Predicts all .nii.gz in a folder. Optionally saves masks, and visualizes a few.
+    Returns list of saved mask paths (if save_dir given).
+    """
+    paths = sorted(glob(os.path.join(image_dir, "*.nii.gz")))
+    if not paths:
+        print(f"No .nii.gz files found in {image_dir}")
+        return []
+
+    saved = []
+    os.makedirs(save_dir, exist_ok=True) if save_dir else None
+    print(f"Found {len(paths)} files in {image_dir}")
+
+    for i, p in enumerate(paths):
+        base = os.path.basename(p).replace("case_", "pred_")
+        out_path = os.path.join(save_dir, base) if save_dir else None
+        img2d, pred = predict_one(model, p, save_path=out_path, resize=resize)
+        if save_dir:
+            saved.append(out_path)
+
+        # visualize a few samples
+        if i < max_visualize:
+            visualize_triplet(img2d, pred, title=os.path.basename(p))
+
+    return saved
 
 
+# --------------------------
+# Run examples
+# --------------------------
 if __name__ == "__main__":
-    main()
+    print(f"Using device: {DEVICE}")
+    model = load_model(CHECKPOINT_PATH, n_classes=NUM_CLASSES)
+
+    # 1) Single-file prediction + visualization
+    img2d, pred = predict_one(model, TEST_IMAGE, save_path=SAVE_SINGLE, resize=RESIZE)
+    visualize_triplet(img2d, pred, title=os.path.basename(TEST_IMAGE))
+
+    # 2) Batch predict an entire folder, save masks, and visualize a few
+    _ = predict_folder(model, TEST_FOLDER, save_dir=SAVE_FOLDER, max_visualize=4, resize=RESIZE)
