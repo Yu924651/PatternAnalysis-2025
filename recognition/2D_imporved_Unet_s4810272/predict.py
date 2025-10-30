@@ -1,261 +1,210 @@
+"""
+Fast 2D U-Net Trainer (Mixed Precision + channels_last)
 
-
-
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-class UNet2D(nn.Module):
-    """ 
-    2D UNet model for the medical image segmentation.
-    """
-    def __init__(self):
-        super(UNet2D, self).__init__()
-
-        # Downstream
-        self.max_pool_2x2 = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.down_conv_1 = double_conv2d(1, 32)
-        self.down_conv_2 = double_conv2d(32, 64)
-        self.down_conv_3 = double_conv2d(64, 128)
-        self.down_conv_4 = double_conv2d(128, 256)
-
-        # Upstream
-        self.up_trans_1 = nn.ConvTranspose2d(in_channels=256,
-                                            out_channels=128,
-                                            kernel_size=2,
-                                            stride=2)
-        self.up_conv_1 = double_conv2d(256, 128)
-        self.up_trans_2 = nn.ConvTranspose2d(in_channels=128,
-                                            out_channels=64,
-                                            kernel_size=2,
-                                            stride=2)
-        self.up_conv_2 = double_conv2d(128, 64)
-        self.up_trans_3 = nn.ConvTranspose2d(in_channels=64,
-                                            out_channels=32,
-                                            kernel_size=2,
-                                            stride=2)
-        self.up_conv_3 = double_conv2d(64, 32)
-        self.out = nn.Conv2d(in_channels=32,
-                            out_channels=6,
-                            kernel_size=1)
-
-
-    def forward(self, image):
-        # Encoding
-        x1 = self.down_conv_1(image)
-        x2 = self.max_pool_2x2(x1)
-        x3 = self.down_conv_2(x2)
-        x4 = self.max_pool_2x2(x3)
-        x5 = self.down_conv_3(x4)
-        x6 = self.max_pool_2x2(x5)
-        x7 = self.down_conv_4(x6)
-
-        ### Decoding
-        x = self.up_trans_1(x7)
-        x = self.up_conv_1(torch.cat([x, x5], 1))
-        x = self.up_trans_2(x)
-        x = self.up_conv_2(torch.cat([x, x3], 1))
-        x = self.up_trans_3(x)
-        x = self.up_conv_3(torch.cat([x, x1], 1))
-
-        x = self.out(x)
-        return x
-
-
-def double_conv2d(in_channels, out_channels):
-    """
-    Double convolutional layer with batch normalization and ReLU activation for the layers in the UNet model.
-    """
-    return nn.Sequential(
-        nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-        nn.BatchNorm2d(out_channels),
-        nn.ReLU(inplace=True),
-        nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
-        nn.BatchNorm2d(out_channels),
-        nn.ReLU(inplace=True),
-    )
-
-
-class DiceLoss(nn.Module):
-    """ 
-    Dice loss calculation for the medical image segmentation.
-    """
-    def __init__(self):
-        super(DiceLoss, self).__init__()
-        self.smooth = 1e-14
-
-    def forward(self, inputs, targets, return_dice=False, separate_classes=False):
-        """ 
-        Calculate the dice loss.
-        Args:
-            inputs (torch.Tensor): The input tensor of format (B, C, H, W) with C being the number of classes (6).
-            targets (torch.Tensor): The target tensor of format (B, C, H, W) with values in the range [0, 5].
-            return_dice (bool): Whether to return the dice coefficient rather than the loss.
-        Returns:
-            torch.Tensor: The dice loss (or coefficient).
-            list: The dice coefficient for each class if separate_classes is True.
-        """
-        inputs = torch.softmax(inputs, dim=1)        
-        targets = F.one_hot(targets, num_classes=6)
-        targets = targets.squeeze(1)
-        targets = targets.permute(0, 3, 1, 2).float()
-
-        inputs = inputs.view(inputs.size(0), inputs.size(1), -1)
-        targets = targets.view(inputs.size(0), inputs.size(1), -1)
-
-        if separate_classes:
-            intersect = (inputs * targets).sum(-1)
-            inputs_sum = inputs.sum(-1)
-            targets_sum = targets.sum(-1)
-            dice = (2 * intersect + self.smooth) / (inputs_sum + targets_sum + self.smooth)
-            return dice if return_dice else 1 - dice
-
-        intersect = torch.abs(inputs * targets).sum()
-        dice = (2 * intersect + self.smooth) / (torch.abs(inputs).sum(-1).sum() + torch.abs(targets).sum(-1).sum() + self.smooth)
-
-        if return_dice:
-            return dice.mean()
-        return 1 - dice.mean()
-
+Compatible with:
+- Improved2DUNet, DiceLoss, dice_per_class_from_logits in modules.py
+- HipMRIDataset / make_loaders in dataset.py
+"""
 
 import os
-import torch
-import dataset as ds
-from dataset import MRIDataLoader, MRIDataset
 import numpy as np
-import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+import torch.optim as optim
 from tqdm import tqdm
 
+# ---- bring your components ----
+from dataset import make_loaders
+from modules import Improved2DUNet, DiceLoss, dice_per_class_from_logits
 
-def load_model(model_path, device):
-    """ 
-    Load the model from the specified path.
-    Args:
-        model_path (str): The path to the saved model.
-        device (torch.device): The device to load the model on.
-    Returns:
-        nn.Module: The model.
-    """
-    model = UNet2D()
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.to(device)
-    return model
+# ================= CONFIG =================
+DATA_ROOT = "/content/drive/My Drive/keras_slices_data"
+OUTDIR     = "/content/drive/My Drive"
+IN_CHANNELS = 1
+NUM_CLASSES = 6
+PROSTATE_CLASS = 1
+BASE = 32
+RESIZE = (256, 128)
 
+EPOCHS = 30
+BATCH_SIZE = 8       
+LR = 1e-4
+WEIGHT_DECAY = 1e-5
+NUM_WORKERS = 8
+GRAD_CLIP = 1.0
+PATIENCE = 5
+# ==========================================
 
-def predict_image(model, image, device):
-    """ 
-    Predict the segmentation mask for the input image.
-    Args:
-        model (nn.Module): The model.
-        image (torch.Tensor): The input image.
-        device (torch.device): The device to run the model on.
-    Returns:
-        torch.Tensor: The predicted segmentation mask.
-    """
-    with torch.no_grad():
-        image = image.to(device)
-        pred = model(image)
-        return pred
-
-
-def plot_prediction(input_img, prediction, target, filename):
-    """ 
-    Plot the input image, prediction and target segmentation masks.
-    Args:
-        input (torch.Tensor): The input image.
-        prediction (torch.Tensor): The predicted segmentation mask.
-        target (torch.Tensor): The target segmentation mask.
-    """
-    plt.figure(figsize=(15, 5))
-    plt.subplot(1, 8, 1)
-    plt.imshow(input_img, cmap='gray')
-    plt.title('Input Image')
-    plt.axis('off')
-    for i in range(6):
-        plt.subplot(1, 8, i+2)
-        plt.imshow(prediction[i], cmap='gray')
-        plt.title(f'Mask {i}')
-        plt.axis('off')
-    plt.axis('off')
-    plt.subplot(1, 8, 8)
-    plt.imshow(target, cmap='gray')
-    plt.title('Target')
-    plt.axis('off')
-    ### Show the plot
-    # plt.show()
-    ### Save the plot
-    if ds.IS_RANGPUR_ENV:
-        save_dir = '/home/Student/s4904983/COMP3710/project/figures/' + filename + '.png' # Rangpur path
-    else:
-        save_dir = 'C:/Users/oykva/OneDrive - NTNU/Semester 7/PatRec/Project/predictions/' + filename + '.png' # Local path
-
-    if not os.path.exists(os.path.dirname(save_dir)):
-        os.makedirs(os.path.dirname(save_dir))
-
-    plt.savefig(save_dir)
+def format_dice_row(dice_vec, highlight_idx=None, prefix=""):
+    """Return a string like: C0:0.9123 C1:[0.8450] C2:0.1234 ..."""
+    parts = []
+    for i, d in enumerate(dice_vec):
+        if highlight_idx is not None and i == highlight_idx:
+            parts.append(f"C{i}:[{d:.4f}]")
+        else:
+            parts.append(f"C{i}:{d:.4f}")
+    return (prefix + " ".join(parts)).strip()
 
 
-def test_model():
-    """ 
-    Test the model on the test data.
-    Args:
-        model (nn.Module): The model.
-        images (torch.Tensor): The test images.
-        segmentations (torch.Tensor): The test segmentations.
-        device (torch.device): The device to run the model on.
-    """
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def train_epoch(model, loader, optimizer, loss_fn, device):
+    model.train()
+    has_cuda = (device.type == "cuda")
 
-    # Directory where model is saved
-    if ds.IS_RANGPUR_ENV:
-        model_dir = '/home/Student/s4904983/COMP3710/project/models/unet_model_ep20.pth' # Rangpur path
-    else:    
-        model_dir = 'C:/Users/oykva/OneDrive - NTNU/Semester 7/PatRec/Project/results_a/unet_model_ep10_a.pth' # Local path
+    sum_loss = 0.0
+    steps = 0
+    dice_sum = np.zeros(NUM_CLASSES, dtype=np.float64)
 
-    print("Loading model")
-    model = load_model(model_dir, device)
+    pbar = tqdm(loader, desc="TRAIN", ncols=120)
+    for x, y in pbar:
+        x = x.to(device, non_blocking=True).to(memory_format=torch.channels_last)
+        y = y.to(device, non_blocking=True)
+
+        optimizer.zero_grad(set_to_none=True)
+
+        # AMP for speed
+        with torch.amp.autocast("cuda", enabled=has_cuda):
+            logits = model(x)
+            loss = 0.5 * loss_fn(logits, y) + 0.5 * nn.functional.cross_entropy(logits, y)
+
+        loss.backward()
+        if GRAD_CLIP and GRAD_CLIP > 0:
+            nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
+        optimizer.step()
+
+        steps += 1
+        sum_loss += float(loss)
+        dice_sum += dice_per_class_from_logits(logits, y, NUM_CLASSES)
+
+        avg_loss = sum_loss / steps
+        avg_dice = dice_sum / steps
+        pbar.set_postfix({
+            "loss": f"{avg_loss:.4f}",
+            "macro": f"{avg_dice.mean():.4f}",
+            "pros": f"{avg_dice[PROSTATE_CLASS]:.4f}",
+        })
+
+    return (sum_loss / steps), (dice_sum / steps)
+
+
+@torch.no_grad()
+def validate_epoch(model, loader, loss_fn, device):
     model.eval()
+    has_cuda = (device.type == "cuda")
 
-    # Load test data
-    print("Loading data")
-    TestDataLoader = MRIDataLoader("test", batch_size=1, shuffle=True)
-    print("Model and test data loaded")
+    sum_loss = 0.0
+    steps = 0
+    dice_sum = np.zeros(NUM_CLASSES, dtype=np.float64)
 
-    # Predict and calculate dice coefficient
-    dice_loss = DiceLoss()
-    dice_coefficients = []
-    dice_per_class = []
-    min_dice_per_class = []
-    predictions = []
+    pbar = tqdm(loader, desc="VAL", ncols=120, colour="cyan")
+    for x, y in pbar:
+        x = x.to(device, non_blocking=True).to(memory_format=torch.channels_last)
+        y = y.to(device, non_blocking=True)
 
-    # Plot a random sample of the predictions
-    rand_idx = np.random.choice(len(TestDataLoader.dataset), 20)
+        with torch.amp.autocast("cuda", enabled=has_cuda):
+            logits = model(x)
+            loss = 0.5 * loss_fn(logits, y) + 0.5 * nn.functional.cross_entropy(logits, y)
 
-    for i, (image, label) in enumerate(tqdm(TestDataLoader)):
-        # image = image[None, None, :, :]
-        pred = predict_image(model, image, device)
-        predictions.append(pred)
-        dice = dice_loss(pred, label.long(), return_dice=True)
-        classwise_dice = dice_loss(pred, label.long(), return_dice=True, separate_classes=True)
-        dice_coefficients.append(dice)
-        dice_per_class.append(classwise_dice)
+        steps += 1
+        sum_loss += float(loss)
+        dice_sum += dice_per_class_from_logits(logits, y, NUM_CLASSES)
 
-        if i in rand_idx:
-            plot_prediction(image[0,0,:,:], pred[0], label[0,0,:,:], f'prediction_{i}')
-    # Print average dice coefficient
-    avg_dice = sum(dice_coefficients) / len(dice_coefficients)
-    print("Average Dice Coefficient: {:.4f}".format(avg_dice))
+        avg_loss = sum_loss / steps
+        avg_dice = dice_sum / steps
+        pbar.set_postfix({
+            "loss": f"{avg_loss:.4f}",
+            "macro": f"{avg_dice.mean():.4f}",
+            "pros": f"{avg_dice[PROSTATE_CLASS]:.4f}",
+        })
 
-    min_dice = min(dice_coefficients)
-    print("Minimum Dice Coefficient: {:.4f}".format(min_dice))
-
-    avg_class_dice = sum([d[0] for d in dice_per_class]) / len(dice_per_class)
-    for i in range(6):
-        print(f"Average Dice Coefficient for class {i}: {avg_class_dice[i]}")
-
-    return
+    return (sum_loss / steps), (dice_sum / steps)
 
 
-if __name__ == '__main__':
-    test_model()
+def main():
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    # ---- Data ----
+    os.makedirs(OUTDIR, exist_ok=True)
+    train_loader, val_loader, test_loader = make_loaders(
+        data_root=DATA_ROOT,
+        batch_size=BATCH_SIZE,
+        num_workers=NUM_WORKERS,
+        resize=RESIZE,
+        normalize=True,
+        num_classes=NUM_CLASSES,
+        transform_train=None,
+        transform_eval=None,
+    )
+    # optional: persistent workers for a tiny speed bump
+    for ld in (train_loader, val_loader, test_loader):
+        ld.persistent_workers = True
+
+    # ---- Model / Optim ----
+    model = Improved2DUNet(IN_CHANNELS, NUM_CLASSES, BASE)
+    model = model.to(device).to(memory_format=torch.channels_last)
+
+    loss_fn = DiceLoss().to(device)
+    optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+
+    best_pros = 0.0
+    no_improve = 0
+
+    print("\nStarting training...\n")
+    for epoch in range(1, EPOCHS + 1):
+        print(f"\n================= EPOCH {epoch}/{EPOCHS} =================")
+
+        tr_loss, tr_dice = train_epoch(model, train_loader, optimizer, loss_fn, device)
+        va_loss, va_dice = validate_epoch(model, val_loader, loss_fn, device)
+
+        # ---- Pretty printing (includes per-class) ----
+        print(f"TRAIN: loss={tr_loss:.4f} | macro={tr_dice.mean():.4f}")
+        print("   " + format_dice_row(tr_dice, highlight_idx=PROSTATE_CLASS, prefix="Train Dice → "))
+
+        print(f"VAL:   loss={va_loss:.4f} | macro={va_dice.mean():.4f}")
+        print("   " + format_dice_row(va_dice, highlight_idx=PROSTATE_CLASS, prefix="Val   Dice → "))
+
+        # ---- Checkpointing ----
+        torch.save(model.state_dict(), os.path.join(OUTDIR, "last.pt"))
+
+        if va_dice[PROSTATE_CLASS] > best_pros:
+            best_pros = float(va_dice[PROSTATE_CLASS])
+            no_improve = 0
+            torch.save(model.state_dict(), os.path.join(OUTDIR, "best.pt"))
+            print(f"Best updated! Val prostate Dice = {best_pros:.4f}")
+        else:
+            no_improve += 1
+            if no_improve >= PATIENCE:
+                print("Early stopping — no validation improvement.")
+                break
+
+    print("\nTraining finished.")
+
+    # ---- Test using best weights ----
+    if os.path.isfile(os.path.join(OUTDIR, "best.pt")):
+        model.load_state_dict(torch.load(os.path.join(OUTDIR, "best.pt"), map_location=device))
+        print("Loaded best.pt for testing")
+    else:
+        print("best.pt not found; using last.pt")
+        model.load_state_dict(torch.load(os.path.join(OUTDIR, "last.pt"), map_location=device))
+
+    model.eval()
+    with torch.no_grad():
+        sum_dice = np.zeros(NUM_CLASSES, dtype=np.float64)
+        steps = 0
+        for x, y in tqdm(test_loader, desc="TEST", ncols=120, colour="green"):
+            x = x.to(device).to(memory_format=torch.channels_last)
+            y = y.to(device)
+            logits = model(x)
+            sum_dice += dice_per_class_from_logits(logits, y, NUM_CLASSES)
+            steps += 1
+
+        test_dice = sum_dice / max(1, steps)
+        print("\n===== TEST RESULTS =====")
+        print(" " + format_dice_row(test_dice, highlight_idx=PROSTATE_CLASS, prefix="Per-class → "))
+        print(f" Macro Dice: {test_dice.mean():.4f}")
+        print(f" Prostate (C{PROSTATE_CLASS}) Dice: {test_dice[PROSTATE_CLASS]:.4f}")
+
+
+if __name__ == "__main__":
+    main()
