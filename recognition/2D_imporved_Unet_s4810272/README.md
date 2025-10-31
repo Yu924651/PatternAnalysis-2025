@@ -12,7 +12,7 @@ It was first proposed by Ronneberger et al. (2015) for cell segmentation in micr
 
 The U-Net consists of two main components, an Encoder (downsampling) and a Decoder (upsampling) which is connected by skip connections, skip connections link features from the encoder to the corresponding decoder layers, combining high-resolution spatial details with contextual, downsampled information. This fusion enables the network to produce accurate and detailed segmentation results.
 example of a 2D UNet visulization:
-![alt text](image-1.png)
+![alt text](simple_unet.png)
 
 ## Improvements / Improved 2D U-Net Data Flow
 For this task, I implemented an Improved 2D U-Net while maintaining the core encoder–decoder structure of the original model.
@@ -89,7 +89,7 @@ Training used the AdamW optimizer with an initial learning rate of 1×10⁻⁴ a
 Validation was conducted after each epoch to track progress and prevent overfitting.
 The model achieved a minimum class Dice score of 0.927 (the lowest of six classes at Epoch 28).
 as figure show below:
-![alt text](image.png)
+![alt text](train_out_put.png)
 
 ### Prediction Outcome
 After training, the model’s learned weights were saved in a checkpoint file (best_model.pth).
@@ -97,7 +97,7 @@ This file stores the network’s optimized parameters — representing what the 
 The prediction function then loads this trained model and performs inference on unseen test images from the keras_slices_test dataset.
 Each test slice is normalized, passed through the network, and produces a pixel-wise segmentation mask.
 Below is an example test image showing the input MRI, predicted segmentation mask, and ground-truth mask:
-![alt text](image-2.png)
+![alt text](predict_out_put.png)
 
 ## Dependencies
 ```
