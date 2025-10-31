@@ -5,18 +5,16 @@ This project implements an Improved 2D U-Net architecture for multi-class semant
 
 The improved design replaces standard U-Net pooling layers with learnable stride-2 convolutions, adds Batch Normalization and LeakyReLU activations for smoother optimization, and incorporates Dropout regularization in the bottleneck to reduce overfitting.
 
-## Model Explain
+## Model Explanation
 ### 2D U-Net
 The 2D U-Net is a convolutional neural network architecture designed specifically for biomedical image segmentation.
 It was first proposed by Ronneberger et al. (2015) for cell segmentation in microscopy images and has since become one of the most widely used models in medical imaging tasks.
 
-The U-Net consists of two main components — an Encoder (downsampling) and a Decoder (upsampling) — connected by skip connections.
-Skip connections link features from the encoder to the corresponding decoder layers, combining high-resolution spatial details with contextual, downsampled information. This fusion enables the network to produce accurate and detailed segmentation results.
+The U-Net consists of two main components, an Encoder (downsampling) and a Decoder (upsampling) which is connected by skip connections, skip connections link features from the encoder to the corresponding decoder layers, combining high-resolution spatial details with contextual, downsampled information. This fusion enables the network to produce accurate and detailed segmentation results.
 example of a 2D UNet visulization:
-
 ![alt text](image-1.png)
 
-### Imporevment
+## Improvements / Improved 2D U-Net Data Flow
 For this task, I implemented an Improved 2D U-Net while maintaining the core encoder–decoder structure of the original model.
 Key modifications include:
 
@@ -53,8 +51,37 @@ Key modifications include:
 The HipMRI dataset provides paired 2D MRI prostate slices and their segmentation masks in .nii.gz format, All images were standardized using Z-score normalization and resized to 256×128 pixels.
 The dataset was divided into three parts: a training set (used to learn the model parameters), a validation set (used to monitor generalization during training), and a test set (used to evaluate the final trained model on unseen data).
 
+### Classes and Size
+Train: 11460 | Val: 660 | Test: 540, with a class size of  6, the snippet below quickly scans a subset to discover total number of classes:
+```
+import os, glob, time, nibabel as nib, numpy as np
+# --- Path to your segmentation folder ---
+mask_dir = "/content/drive/My Drive/keras_slices_data/keras_slices_seg_train"
+
+# --- Limit how many files to scan ---
+N = 200  # only scan first 200 masks for speed
+
+# --- Setup ---
+all_classes, t0 = set(), time.time()
+paths = sorted(glob.glob(os.path.join(mask_dir, "*.nii.gz")))[:N]
+
+print(f"Scanning {len(paths)} files from: {mask_dir}\n")
+
+# --- Main loop ---
+for i, p in enumerate(paths, 1):
+    mask = np.rint(nib.load(p).get_fdata()).astype(int)
+    all_classes |= set(np.unique(mask))
+    if i % 50 == 0:
+        print(f"Scanned {i} files... current unique classes: {len(all_classes)}")
+
+# --- Results ---
+print("\nFinished scanning!")
+print(f"Total number of unique classes: {len(all_classes)}")
+print(f"Elapsed time: {time.time() - t0:.2f} seconds")
+```
+
 ## Training and Prediction
-### Traning Results
+### Training Results
 The model was trained for 30 epochs with a batch size of 8, using Dice loss as the objective function.
 Dice loss is derived from the Dice Similarity Coefficient (DSC) and measures the overlap between predicted and ground-truth segmentation masks.
 During training, per-class Dice scores (C0–C5) were also computed to monitor segmentation performance across different tissue types.
@@ -81,7 +108,7 @@ nibabel
 matplotlib
 numpy
 ```
-This report is trained on google colab so in order to run code pleas:
+This report is trained on google colab so in order to run code please:
 
 In ***train.py***  remove if running in Colab and model is defined elsewhere:
 ```
@@ -98,8 +125,9 @@ In ***predict.py*** also # remove if running in Colab and model is defined elsew
 from dataset import _zscore
 from modules import Improved2DUNet  # remove if running in Colab and model is defined elsewhere
 ```
-also change input and out put file to relevent path:
+Change input put file to relevent path:
 ```
 CHECKPOINT_PATH = "/content/drive/My Drive/checkpoints/best_model.pth"
 TEST_IMAGE = "/content/drive/My Drive/keras_slices_data/keras_slices_test/case_040_week_0_slice_0.nii.gz"
+GROUND_TRUTH = "/content/drive/My Drive/keras_slices_data/keras_slices_seg_test/seg_040_week_0_slice_0.nii.gz"
 ```

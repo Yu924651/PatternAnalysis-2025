@@ -11,18 +11,17 @@ import nibabel as nib
 import numpy as np
 import matplotlib.pyplot as plt
 
-
 from dataset import _zscore # remove if running in Colab and model is defined elsewhere
 from modules import Improved2DUNet  # remove if running in Colab and model is defined elsewhere
 
-# --------------------------
-# Config
-# --------------------------
+
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 NUM_CLASSES = 6
 RESIZE = (256, 128)  # must match training
+# path
 CHECKPOINT_PATH = "/content/drive/My Drive/checkpoints/best_model.pth"
 TEST_IMAGE = "/content/drive/My Drive/keras_slices_data/keras_slices_test/case_040_week_0_slice_0.nii.gz"
+GROUND_TRUTH = "/content/drive/My Drive/keras_slices_data/keras_slices_seg_test/seg_040_week_0_slice_0.nii.gz"
 
 
 def load_model(checkpoint_path: str, n_classes: int = NUM_CLASSES) -> torch.nn.Module:
@@ -48,7 +47,7 @@ def predict_one(model: torch.nn.Module, image_path: str, resize: tuple = RESIZE)
     if img.ndim != 2:
         raise ValueError(f"Expected 2D NIfTI but got shape {img.shape} at {image_path}")
 
-     # Normalize
+    # Normalize
     img_norm = _zscore(img)
     img_t = torch.from_numpy(img_norm).unsqueeze(0).unsqueeze(0).to(DEVICE)  # (1,1,H,W)
 
@@ -86,7 +85,7 @@ def load_ground_truth(mask_path: str, resize: tuple = RESIZE):
 
     return mask
 
-def visualize_triplet(img2d: np.ndarray, mask2d: np.ndarray, alpha: float = 0.35, title: str = ""):
+def visualize_prediction(img2d: np.ndarray, mask2d: np.ndarray,  gt_mask: np.ndarray, title: str = ""):
     """
     Displays three panels side-by-side:
       1. Original input MRI slice
@@ -105,24 +104,24 @@ def visualize_triplet(img2d: np.ndarray, mask2d: np.ndarray, alpha: float = 0.35
     plt.title("Predicted Mask")
     plt.axis("off")
 
+    # Ground truth mask
     plt.subplot(1, 3, 3)
-    plt.imshow(img2d, cmap="gray")
-    plt.imshow(mask2d, cmap="nipy_spectral", alpha=alpha, vmin=0, vmax=NUM_CLASSES - 1)
-    plt.title("Overlay")
+    plt.imshow(gt_mask, cmap="nipy_spectral", vmin=0, vmax=NUM_CLASSES - 1)
+    plt.title("Ground Truth Mask")
     plt.axis("off")
-
+    
     if title:
         plt.suptitle(title)
     plt.tight_layout()
     plt.show()
 
 
-# --------------------------
 # Run single prediction
-# --------------------------
 if __name__ == "__main__":
     print(f"Using device: {DEVICE}")
     model = load_model(CHECKPOINT_PATH, n_classes=NUM_CLASSES)
 
     img2d, pred = predict_one(model, TEST_IMAGE, resize=RESIZE)
-    visualize_triplet(img2d, pred, title=os.path.basename(TEST_IMAGE))
+    # Load ground truth for comparison
+    gt_mask = load_ground_truth(GROUND_TRUTH, resize=RESIZE)
+    visualize_prediction(img2d, pred, gt_mask, title=os.path.basename(TEST_IMAGE))

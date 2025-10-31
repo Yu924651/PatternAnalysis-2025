@@ -1,5 +1,10 @@
 """
 Train script for Improved2DUNet on HipMRI dataset
+    Uses Dice loss to measure segmentation overlap.
+    Implements per-class Dice evaluation (C0–C5).
+    AdamW optimizer with weight decay.
+    Supports GPU acceleration and output saving.
+    Performs validation.
 """
 import os, time
 import torch
@@ -11,9 +16,8 @@ from tqdm import tqdm
 from modules import Improved2DUNet, DiceLoss
 from dataset import make_loaders
 
-# -----------------------------
-# One epoch of training 
-# -----------------------------
+
+# One epoch of training -
 def train_epoch(model, train_loader, criterion, optimizer, device, num_classes=6, eps=1e-6, report_class=3):
     """
     Runs one training epoch in FP32.
@@ -72,9 +76,6 @@ def train_epoch(model, train_loader, criterion, optimizer, device, num_classes=6
     return epoch_loss, dice_per_class
 
 
-# -----------------------------
-# Validation (FP32, no grad)
-# -----------------------------
 @torch.no_grad()
 def validate(model, val_loader, criterion, device, num_classes=6, eps=1e-6, report_class=3):
     """
@@ -126,9 +127,7 @@ def validate(model, val_loader, criterion, device, num_classes=6, eps=1e-6, repo
     return epoch_loss, dice_per_class
 
 
-# -----------------------------
 # Main training loop
-# -----------------------------
 def train_model(
     data_path,
     num_epochs=30,
@@ -208,9 +207,7 @@ def train_model(
     return model
 
 
-# -----------------------------
 # Entry point
-# -----------------------------
 if __name__ == "__main__":
     data_path = "/content/drive/My Drive/keras_slices_data"
     num_epochs = 30

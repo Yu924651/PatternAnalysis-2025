@@ -18,35 +18,20 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import torch.nn.functional as F
 
-
-# --------------------------
-# Helper: Z-score normalize
-# --------------------------
 def _zscore(x, eps=1e-6):
     """
     Standardization: (x - mean) / std
-    Used for MRI images to stabilize training.
-    eps avoids division by zero when std=0.
     """
     mu = x.mean()
     sd = x.std()
     return (x - mu) / (sd + eps)
-
-# ===================================================
-# Dataset class
-# ===================================================
 class HipMRI(Dataset):
     """
     PyTorch Dataset for HipMRI 2D segmentation.
-
-    Each __getitem__ returns:
-      image: tensor shape (1, H, W), float32
-      mask:  tensor shape (H, W),   int64 (class IDs)
     """
-
     def __init__(
         self,
-        data_root,      # root folder path
+        data_root,  
         img_folder,
         seg_folder,
         resize=(256, 128),
@@ -85,9 +70,7 @@ class HipMRI(Dataset):
     def __len__(self):
         return len(self.pairs)
 
-    # -----------------------------------
     # Load one 2D .nii.gz file
-    # -----------------------------------
     def _load_nifti(self, path, is_mask=False):
         img = nib.load(path).get_fdata(dtype=np.float32)
 
@@ -95,7 +78,7 @@ class HipMRI(Dataset):
             raise ValueError(f"Expected 2D NIfTI but got shape {img.shape} at {path}")
 
         if is_mask:
-            # Convert float → integer labels
+            # Convert float to integer labels
             mask = np.rint(img).astype(np.int64)
             # Clip labels so they stay valid
             mask[(mask < 0) | (mask >= self.num_classes)] = 0
@@ -107,31 +90,29 @@ class HipMRI(Dataset):
 
         return img.astype(np.float32)
 
-    # ---------------------------------
     # Return one training sample
-    # ---------------------------------
     def __getitem__(self, idx):
         img_path, mask_path = self.pairs[idx]
 
         # Load numpy arrays
-        x = self._load_nifti(img_path, is_mask=False)  # (H, W)
-        y = self._load_nifti(mask_path, is_mask=True)  # (H, W)
+        x = self._load_nifti(img_path, is_mask=False)  
+        y = self._load_nifti(mask_path, is_mask=True)  
 
         # Convert to PyTorch tensors
-        x = torch.from_numpy(x).unsqueeze(0)  # add channel → (1,H,W)
-        y = torch.from_numpy(y).long()       # mask must be int64
+        x = torch.from_numpy(x).unsqueeze(0)
+        y = torch.from_numpy(y).long()
 
         # Resize both image and mask if needed
         if self.resize is not None:
             H, W = self.resize
             if x.shape[1:] != (H, W):
-                # image → bilinear (smooth)
+                # image to bilinear
                 x = F.interpolate(
                     x.unsqueeze(0), size=(H, W),
                     mode="bilinear", align_corners=False
                 ).squeeze(0)
 
-                # mask → nearest (keeps class labels)
+                # mask to nearest (keeps class labels)
                 y = F.interpolate(
                     y.unsqueeze(0).unsqueeze(0).float(),
                     size=(H, W), mode="nearest"
@@ -140,9 +121,7 @@ class HipMRI(Dataset):
         return x.float(), y
 
 
-# ===================================================
 # DataLoader helper 
-# ===================================================
 def make_loaders(
     data_root,
     batch_size=8,
@@ -154,7 +133,6 @@ def make_loaders(
     """
     Build train, validation, and test DataLoaders using explicit folder names.
     """
-
     train_ds = HipMRI(
         data_root,
         img_folder="keras_slices_train",
