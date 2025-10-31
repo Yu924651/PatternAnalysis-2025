@@ -1,4 +1,9 @@
-# === Predict + Visualize for HipMRI (no saving) ===
+"""
+  Predict + Visualize for HipMRI
+  loads a trained Improved2DUNet model,
+  performs segmentation prediction on a single MRI slice (.nii.gz file)
+  visualizes both the predicted mask and the input image.
+"""
 import os
 import torch
 import torch.nn.functional as F
@@ -7,7 +12,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-from dataset import _zscore
+from dataset import _zscore # remove if running in Colab and model is defined elsewhere
 from modules import Improved2DUNet  # remove if running in Colab and model is defined elsewhere
 
 # --------------------------
@@ -21,6 +26,10 @@ TEST_IMAGE = "/content/drive/My Drive/keras_slices_data/keras_slices_test/case_0
 
 
 def load_model(checkpoint_path: str, n_classes: int = NUM_CLASSES) -> torch.nn.Module:
+    """
+    Loads the trained Improved2DUNet model from saved file.
+    Moves it to the device and sets it to evaluation mode.
+    """
     model = Improved2DUNet(in_channels=1, n_classes=n_classes, base=32, p_drop=0.2)
     ckpt = torch.load(checkpoint_path, map_location=DEVICE)
     model.load_state_dict(ckpt["model_state_dict"])
@@ -29,31 +38,61 @@ def load_model(checkpoint_path: str, n_classes: int = NUM_CLASSES) -> torch.nn.M
 
 @torch.no_grad()
 def predict_one(model: torch.nn.Module, image_path: str, resize: tuple = RESIZE):
-    """Predict mask for a single 2D .nii.gz image (no saving)."""
+    """
+    Predicts the segmentation mask for a single 2D .nii.gz image (no saving).
+    """
     nii = nib.load(image_path)
     img = nii.get_fdata(dtype=np.float32)
 
+    # Ensure image is 2D
     if img.ndim != 2:
         raise ValueError(f"Expected 2D NIfTI but got shape {img.shape} at {image_path}")
 
+     # Normalize
     img_norm = _zscore(img)
     img_t = torch.from_numpy(img_norm).unsqueeze(0).unsqueeze(0).to(DEVICE)  # (1,1,H,W)
 
+    # Resize to training if needed
     if resize is not None and img_t.shape[2:] != resize:
         img_t = F.interpolate(img_t, size=resize, mode="bilinear", align_corners=False)
 
-    # --- Predict ---
-    use_amp = (DEVICE.type == "cuda")
-    with torch.cuda.amp.autocast(enabled=use_amp):
-        logits = model(img_t)
-        pred = torch.argmax(logits, dim=1)  # (1,H,W)
+    # prediction
+    logits = model(img_t)
+    pred = torch.argmax(logits, dim=1)  # (1,H,W)
 
+    # Back to numpy for visualization
     pred_mask = pred.squeeze(0).cpu().numpy().astype(np.uint8)
     return img_norm, pred_mask
 
 
+def load_ground_truth(mask_path: str, resize: tuple = RESIZE):
+    """
+    Load a 2D NIfTI ground-truth mask, cast to integer labels, and (optionally) resize.
+    """
+    nii = nib.load(mask_path)
+    mask = nii.get_fdata(dtype=np.float32)
+    if mask.ndim != 2:
+        raise ValueError(f"Expected 2D NIfTI mask but got shape {mask.shape} at {mask_path}")
+
+    mask = np.rint(mask).astype(np.int64)
+
+    # Resize via nearest neighbor to preserve class IDs
+    if resize is not None and mask.shape != resize:
+        mask_t = torch.from_numpy(mask[None, None].astype(np.float32))
+        mask_t = F.interpolate(mask_t, size=resize, mode="nearest")
+        mask = mask_t.squeeze().numpy().astype(np.uint8)
+    else:
+        mask = mask.astype(np.uint8)
+
+    return mask
+
 def visualize_triplet(img2d: np.ndarray, mask2d: np.ndarray, alpha: float = 0.35, title: str = ""):
-    """Show input, mask, and overlay side-by-side."""
+    """
+    Displays three panels side-by-side:
+      1. Original input MRI slice
+      2. Predicted segmentation mask
+      3. Ground-truth mask
+    """
     plt.figure(figsize=(12, 4))
 
     plt.subplot(1, 3, 1)

@@ -83,25 +83,23 @@ numpy
 ```
 This report is trained on google colab so in order to run code pleas:
 
-In ***train.py*** comment out (i have added this in beacause i am using VS code to do the commit and README):
+In ***train.py***  remove if running in Colab and model is defined elsewhere:
 ```
 from modules import Improved2DUNet, DiceLoss
 from dataset import make_loaders
 ```
-change input and out put file:
+change input and out put file to relevent path:
 ```
 data_path = "/content/drive/My Drive/keras_slices_data"
 save_dir='/content/drive/My Drive/checkpoints'
 ```
-In ***predict.py*** also comment out:
+In ***predict.py*** also # remove if running in Colab and model is defined elsewhere:
 ```
 from dataset import _zscore
 from modules import Improved2DUNet  # remove if running in Colab and model is defined elsewhere
 ```
-and change:
+also change input and out put file to relevent path:
 ```
 CHECKPOINT_PATH = "/content/drive/My Drive/checkpoints/best_model.pth"
 TEST_IMAGE = "/content/drive/My Drive/keras_slices_data/keras_slices_test/case_040_week_0_slice_0.nii.gz"
 ```
-
-if you want to train on local GPU then keep the import for both train.py and predict.py

@@ -2,17 +2,16 @@
 HipMRI 2D prostate segmentation dataset loader (simple version)
 
 This loader does:
-• Load paired .nii.gz image + mask files
-• Ensure 2D format
-• Z-score normalize MRI images
-• Keep segmentation masks as integer class labels
-• Resize both image + mask to a consistent size
-• Return PyTorch tensors ready for a segmentation model
+  Load paired .nii.gz image + mask files
+  Ensure 2D format
+  Z-score normalize MRI images
+  Keep segmentation masks as integer class labels
+  Resize both image + mask to a consistent size
+  Return PyTorch tensors ready for a segmentation model
 """
 
 import os
 import glob
-
 import numpy as np
 import nibabel as nib
 import torch

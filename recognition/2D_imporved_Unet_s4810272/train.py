@@ -1,5 +1,5 @@
 """
-Train script for Improved2DUNet on HipMRI dataset (simple FP32 version)
+Train script for Improved2DUNet on HipMRI dataset
 """
 import os, time
 import torch
@@ -12,10 +12,7 @@ from modules import Improved2DUNet, DiceLoss
 from dataset import make_loaders
 
 # -----------------------------
-# One epoch of training (FP32)
-# -----------------------------
-# -----------------------------
-# One epoch of training (FP32) with streaming per-class Dice
+# One epoch of training 
 # -----------------------------
 def train_epoch(model, train_loader, criterion, optimizer, device, num_classes=6, eps=1e-6, report_class=3):
     """
@@ -130,7 +127,7 @@ def validate(model, val_loader, criterion, device, num_classes=6, eps=1e-6, repo
 
 
 # -----------------------------
-# Main training loop (FP32)
+# Main training loop
 # -----------------------------
 def train_model(
     data_path,
@@ -144,6 +141,7 @@ def train_model(
     prefetch_factor=2,
     persistent_workers=True
 ):
+    # Create the save directory if it doesn't already exist
     os.makedirs(save_dir, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -161,23 +159,27 @@ def train_model(
     # Model / loss / optimizer
     model = Improved2DUNet(in_channels=1, n_classes=num_classes, base=32, p_drop=0.2).to(device)
     criterion = DiceLoss()
+    # AdamW optimizer for weight updates 
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-5)
 
     best_val_min_dice = 0.0  # we keep a single best-by-min-class-Dice metric
 
     print(f"\nStarting training for {num_epochs} epochs...\n")
     epoch_start = time.time()
+    # Training loop (per epoch)
     for epoch in range(1, num_epochs + 1):
         print(f"Epoch {epoch}/{num_epochs}")
         print("-" * 50)
-
+        # Training phase
         train_loss, train_dice = train_epoch(model, train_loader, criterion, optimizer, device,
                                              num_classes=num_classes)
+        # Validation phase
         val_loss,   val_dice   = validate(model, val_loader, criterion, device,
                                           num_classes=num_classes)
 
         min_val_dice = min(val_dice)
 
+        # Print epoch summary
         print(f"\nTrain Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | LR: {optimizer.param_groups[0]['lr']:.2e}")
         print("Train Dice: " + " ".join([f"C{i}:{d:.4f}" for i,d in enumerate(train_dice)]))
         print("Val   Dice: " + " ".join([f"C{i}:{d:.4f}" for i,d in enumerate(val_dice)]))
@@ -194,7 +196,7 @@ def train_model(
             }, os.path.join(save_dir, 'best_model.pth'))
             print(f"Saved best model (min Dice across classes): {best_val_min_dice:.4f}")
 
-        # ETA
+        # Estimate remaining training time (ETA)
         epoch_time = time.time() - epoch_start
         remaining = num_epochs - epoch
         eta_min = (epoch_time * remaining) / 60.0
@@ -207,7 +209,7 @@ def train_model(
 
 
 # -----------------------------
-# Example entry point
+# Entry point
 # -----------------------------
 if __name__ == "__main__":
     data_path = "/content/drive/My Drive/keras_slices_data"
